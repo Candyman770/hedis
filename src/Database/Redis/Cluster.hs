@@ -9,15 +9,23 @@ module Database.Redis.Cluster
   , NodeRole(..)
   , NodeConnection(..)
   , Node(..)
+  , NodeID
   , ShardMap(..)
   , HashSlot
   , Shard(..)
   , TimeoutException(..)
+  , MissingNodeException(..)
+  , CrossSlotException(..)
   , connect
   , disconnect
   , requestPipelined
   , requestMasterNodes
   , nodes
+  , hasLocked
+  , requestNode
+  , requestKeys
+  , hashSlotForKeys
+  , askingRedirection
 ) where
 
 import qualified Data.ByteString as B

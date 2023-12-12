@@ -92,6 +92,7 @@ data ConnectInfo = ConnInfo
     --   get connected in this interval of time.
     , connectTLSParams      :: Maybe ClientParams
     -- ^ Optional TLS parameters. TLS will be enabled if this is provided.
+    , requestTimeout        :: Maybe Time.NominalDiffTime
     } deriving Show
 
 data ConnectError = ConnectAuthError Reply
@@ -124,6 +125,7 @@ defaultConnectInfo = ConnInfo
     , connectMaxIdleTime    = 30
     , connectTimeout        = Nothing
     , connectTLSParams      = Nothing
+    , requestTimeout        = Nothing
     }
 
 createConnection :: ConnectInfo -> IO PP.Connection
