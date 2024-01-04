@@ -320,7 +320,7 @@ import Prelude hiding (min,max)
 import Data.ByteString (ByteString)
 import Database.Redis.ManualCommands
 import Database.Redis.Types
-import Database.Redis.Core(sendRequest, RedisCtx)
+import Database.Redis.Lite.Core(RedisCtx(..))
 
 ttl
     :: (RedisCtx m f)

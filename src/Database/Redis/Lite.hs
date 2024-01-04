@@ -1,4 +1,4 @@
-module Database.Redis (
+module Database.Redis.Lite (
     -- * How To Use This Module
     -- |
     -- Connect to a Redis server:
@@ -158,14 +158,15 @@ module Database.Redis (
 
     -- * The Redis Monad
     Redis(), runRedis,
-    unRedis, reRedis,
-    RedisCtx(..), MonadRedis(..),
+    RedisCtx(..),
 
     -- * Connection
-    Connection, ConnectError(..), connect, checkedConnect, disconnect,
-    withConnect, withCheckedConnect,
-    ConnectInfo(..), defaultConnectInfo, parseConnectInfo, connectCluster,
+    connect, disconnect, connectCluster, ConnectError(..),
+    ConnectInfo(..), defaultConnectInfo, parseConnectInfo,
     PortID(..),
+
+    -- * Types
+    module Database.Redis.Lite.Types,
 
     -- * Commands
     module Database.Redis.Commands,
@@ -177,8 +178,6 @@ module Database.Redis (
     module Database.Redis.PubSub,
 
     -- * Low-Level Command API
-    sendRequest,
-    sendToAllMasterNodes,
     Reply(..),Status(..),RedisResult(..),ConnectionLostException(..),
     ConnectTimeout(..),
 
@@ -192,22 +191,17 @@ module Database.Redis (
     --
     --  > lindex :: ByteString -> Integer -> Redis (Either Reply ByteString)
     --
-    HashSlot, keyToSlot
+    HashSlot(..), keyToSlot
 ) where
 
-import Database.Redis.Core
+import Database.Redis.Lite.Core
+import Database.Redis.Lite.Types
+import Database.Redis.Lite.Connect (connect, disconnect, connectCluster, runRedis)
 import Database.Redis.Connection
-    ( runRedis
-    , connectCluster
-    , defaultConnectInfo
-    , disconnect
-    , checkedConnect
-    , connect
-    , ConnectError(..)
-    , Connection(..)
-    , withConnect
-    , withCheckedConnect)
-import Database.Redis.Lite.Types (ConnectInfo(..))
+  ( ConnectError(..)
+  , defaultConnectInfo
+  )
+
 import Database.Redis.ConnectionContext(PortID(..), ConnectionLostException(..), ConnectTimeout(..))
 import Database.Redis.PubSub
 import Database.Redis.Protocol
@@ -216,4 +210,4 @@ import Database.Redis.Types
 import Database.Redis.URL
 
 import Database.Redis.Commands
-import Database.Redis.Cluster.HashSlot(HashSlot, keyToSlot)
+import Database.Redis.Cluster.HashSlot(HashSlot(..), keyToSlot)

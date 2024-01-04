@@ -68,8 +68,7 @@ library
   if flag(dev)
     ghc-prof-options: -auto-all
   exposed-modules:  Database.Redis
-                  , Database.Redis.ClusterChan.ClusterChan
-                  , Database.Redis.ClusterChan.ClusterChanConnect
+                  , Database.Redis.Lite
                   , Database.Redis.Sentinel
                   , Database.Redis.Core.Internal
   build-depends:    scanner >= 0.2,
@@ -101,6 +100,11 @@ library
       semigroups >= 0.11 && < 0.19
 
   other-modules:    Database.Redis.Core,
+                    Database.Redis.Lite.Cluster
+                    Database.Redis.Lite.Connect
+                    Database.Redis.Lite.Core
+                    Database.Redis.Lite.NonCluster
+                    Database.Redis.Lite.Types
                     Database.Redis.Connection,
                     Database.Redis.Cluster,
                     Database.Redis.Cluster.HashSlot,

@@ -10,7 +10,7 @@ import Data.Maybe (maybeToList, catMaybes)
 #if __GLASGOW_HASKELL__ < 808
 import Data.Semigroup ((<>))
 #endif
-import Database.Redis.Core
+import Database.Redis.Lite.Core (RedisCtx(..))
 import Database.Redis.Protocol
 import Database.Redis.Types
 import qualified Database.Redis.Cluster.Command as CMD

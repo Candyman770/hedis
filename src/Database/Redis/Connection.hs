@@ -16,9 +16,6 @@ import Data.Functor(void)
 import qualified Data.IntMap.Strict as IntMap
 import Data.Pool(Pool, withResource, createPool, destroyAllResources)
 import Data.Typeable
-import qualified Data.Time as Time
-import Network.TLS (ClientParams)
-import qualified Network.Socket as NS
 import qualified Data.HashMap.Strict as HM
 import System.Random (randomRIO)
 import System.Environment (lookupEnv)
@@ -26,23 +23,20 @@ import Data.Maybe (fromMaybe)
 import Text.Read (readMaybe)
 
 import qualified Database.Redis.ProtocolPipelining as PP
-import Database.Redis.Core(Redis, runRedisInternal, runRedisClusteredInternal)
+import Database.Redis.Core(Redis, RedisCtx(..), sendRequest, runRedisInternal, runRedisClusteredInternal)
 import Database.Redis.Protocol(Reply(..))
 import Database.Redis.Cluster(ShardMap(..), Node, Shard(..))
+import Database.Redis.Types (Status, encode)
 import qualified Database.Redis.Cluster as Cluster
+import qualified Database.Redis.Cluster.Command as CMD
 import qualified Database.Redis.ConnectionContext as CC
+import Database.Redis.Lite.Types (ConnectInfo(..))
 import           Control.Concurrent (threadDelay)
 import           Control.Concurrent.Async (race)
 --import qualified Database.Redis.Cluster.Pipeline as ClusterPipeline
 
 import Database.Redis.Commands
-    ( ping
-    , select
-    , auth
-    , clusterSlots
-    , command
-    , readOnly
-    , ClusterSlotsResponse(..)
+    ( ClusterSlotsResponse(..)
     , ClusterSlotsResponseEntry(..)
     , ClusterSlotsNode(..))
 
@@ -68,32 +62,6 @@ data Connection
 -- myConnectInfo = defaultConnectInfo {connectAuth = Just \"secret\"}
 -- @
 --
-data ConnectInfo = ConnInfo
-    { connectHost           :: NS.HostName
-    , connectPort           :: CC.PortID
-    , connectAuth           :: Maybe B.ByteString
-    , connectReadOnly       :: Bool
-    -- ^ When the server is protected by a password, set 'connectAuth' to 'Just'
-    --   the password. Each connection will then authenticate by the 'auth'
-    --   command.
-    , connectDatabase       :: Integer
-    -- ^ Each connection will 'select' the database with the given index.
-    , connectMaxConnections :: Int
-    -- ^ Maximum number of connections to keep open. The smallest acceptable
-    --   value is 1.
-    , connectMaxIdleTime    :: Time.NominalDiffTime
-    -- ^ Amount of time for which an unused connection is kept open. The
-    --   smallest acceptable value is 0.5 seconds. If the @timeout@ value in
-    --   your redis.conf file is non-zero, it should be larger than
-    --   'connectMaxIdleTime'.
-    , connectTimeout        :: Maybe Time.NominalDiffTime
-    -- ^ Optional timeout until connection to Redis gets
-    --   established. 'ConnectTimeoutException' gets thrown if no socket
-    --   get connected in this interval of time.
-    , connectTLSParams      :: Maybe ClientParams
-    -- ^ Optional TLS parameters. TLS will be enabled if this is provided.
-    , requestTimeout        :: Maybe Time.NominalDiffTime
-    } deriving Show
 
 data ConnectError = ConnectAuthError Reply
                   | ConnectSelectError Reply
@@ -126,7 +94,38 @@ defaultConnectInfo = ConnInfo
     , connectTimeout        = Nothing
     , connectTLSParams      = Nothing
     , requestTimeout        = Nothing
+    , pipelineBatchSize     = Nothing
     }
+
+auth
+    :: RedisCtx m f
+    => B.ByteString -- ^ password
+    -> m (f Status)
+auth password = sendRequest ["AUTH", password]
+
+-- the select command. used in 'connect'.
+select
+    :: RedisCtx m f
+    => Integer -- ^ index
+    -> m (f Status)
+select ix = sendRequest ["SELECT", encode ix]
+
+-- the ping command. used in 'checkedconnect'.
+ping
+    :: (RedisCtx m f)
+    => m (f Status)
+ping  = sendRequest (["PING"] )
+
+command :: (RedisCtx m f) => m (f [CMD.CommandInfo])
+command = sendRequest ["COMMAND"]
+
+readOnly :: (RedisCtx m f) => m (f Status)
+readOnly = sendRequest ["READONLY"]
+
+clusterSlots
+    :: (RedisCtx m f)
+    => m (f ClusterSlotsResponse)
+clusterSlots = sendRequest $ ["CLUSTER", "SLOTS"]
 
 createConnection :: ConnectInfo -> IO PP.Connection
 createConnection ConnInfo{..} = do

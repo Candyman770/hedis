@@ -25,7 +25,6 @@ module Database.Redis.Cluster
   , requestNode
   , requestKeys
   , hashSlotForKeys
-  , askingRedirection
 ) where
 
 import qualified Data.ByteString as B
@@ -51,6 +50,7 @@ import System.Environment (lookupEnv)
 import System.IO.Unsafe(unsafeInterleaveIO)
 import Text.Read (readMaybe)
 
+import Database.Redis.Lite.Types hiding (Connection, ChanRequest(..), ClusterChanRequest(..), ClusterEnv(..))
 import Database.Redis.Protocol(Reply(Error), renderRequest, reply)
 import qualified Database.Redis.Cluster.Command as CMD
 
@@ -68,18 +68,6 @@ import qualified Database.Redis.Cluster.Command as CMD
 type IsReadOnly = Bool
 
 data Connection = Connection (HM.HashMap NodeID NodeConnection) (MVar Pipeline) (MVar ShardMap) CMD.InfoMap IsReadOnly
-
--- | A connection to a single node in the cluster, similar to 'ProtocolPipelining.Connection'
-data NodeConnection = NodeConnection CC.ConnectionContext (IOR.IORef (Maybe B.ByteString)) NodeID
-
-instance Show NodeConnection where
-    show (NodeConnection _ _ id1) = "nodeId: " <> show id1
-
-instance Eq NodeConnection where
-    (NodeConnection _ _ id1) == (NodeConnection _ _ id2) = id1 == id2
-
-instance Ord NodeConnection where
-    compare (NodeConnection _ _ id1) (NodeConnection _ _ id2) = compare id1 id2
 
 data PipelineState =
       -- Nothing in the pipeline has been evaluated yet so nothing has been
@@ -99,27 +87,6 @@ data PipelineState =
 -- replies within it.
 
 newtype Pipeline = Pipeline (MVar PipelineState)
-
-data NodeRole = Master | Slave deriving (Show, Eq, Ord)
-
-type Host = String
-type Port = Int
-type NodeID = B.ByteString
--- Represents a single node, note that this type does not include the 
--- connection to the node because the shard map can be shared amongst multiple
--- connections
-data Node = Node NodeID NodeRole Host Port deriving (Show, Eq, Ord)
-
-type MasterNode = Node
-type SlaveNode = Node
-
--- A 'shard' is a master node and 0 or more slaves, (the 'master', 'slave'
--- terminology is unfortunate but I felt it better to follow the documentation
--- until it changes).
-data Shard = Shard MasterNode [SlaveNode] deriving (Show, Eq, Ord)
-
--- A map from hashslot to shards
-newtype ShardMap = ShardMap (IntMap.IntMap Shard) deriving (Show)
 
 newtype MissingNodeException = MissingNodeException [B.ByteString] deriving (Show, Typeable)
 instance Exception MissingNodeException

@@ -11,7 +11,8 @@ import Control.Monad (guard)
 #if __GLASGOW_HASKELL__ < 808
 import Data.Monoid ((<>))
 #endif
-import Database.Redis.Connection (ConnectInfo(..), defaultConnectInfo)
+import Database.Redis.Connection (defaultConnectInfo)
+import Database.Redis.Lite.Types (ConnectInfo(..))
 import qualified Database.Redis.ConnectionContext as CC
 import Network.HTTP.Base
 import Network.URI (parseURI, uriPath, uriScheme)

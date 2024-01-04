@@ -16,9 +16,11 @@ import GHC.Generics
 import Data.ByteString (ByteString)
 import Data.Vector (Vector, fromList, (!))
 
-import Database.Redis.Core
+-- import Database.Redis.Core
 import Database.Redis.Protocol
 import Database.Redis.Types
+import Database.Redis.Lite.Types
+import Database.Redis.Lite.Core (RedisCtx(..), sendRequestMulti)
 
 
 -- |Command-context inside of MULTI\/EXEC transactions. Use 'multiExec' to run
@@ -27,21 +29,28 @@ import Database.Redis.Types
 --  In the 'RedisTx' context, all commands return a 'Queued' value. It is a
 --  proxy object for the /actual/ result, which will only be available after
 --  finishing the transaction.
-newtype RedisTx a = RedisTx (StateT Int Redis a)
+newtype RedisTx a = RedisTx (StateT (Int, [[ByteString]]) Redis a)
     deriving (Monad, MonadIO, Functor, Applicative)
 
-runRedisTx :: RedisTx a -> Redis a
-runRedisTx (RedisTx r) = evalStateT r 0
+runRedisTx :: RedisTx a -> Redis (a, (Int, [[ByteString]]))
+runRedisTx (RedisTx r) = runStateT r (0, [])
 
-instance MonadRedis RedisTx where
-    liftRedis = RedisTx . lift
+-- instance MonadRedis RedisTx where
+--     liftRedis = RedisTx . lift
+
+-- instance RedisCtx RedisTx Queued where
+--     returnDecode _queued = RedisTx $ do
+--         -- future index in EXEC result list
+--         i <- get
+--         put (i+1)
+--         return $ Queued (decode . (! i))
 
 instance RedisCtx RedisTx Queued where
-    returnDecode _queued = RedisTx $ do
-        -- future index in EXEC result list
-        i <- get
-        put (i+1)
-        return $ Queued (decode . (! i))
+  sendRequest req = RedisTx $ do
+    -- future index in EXEC result list
+    (i, reqList) <- get
+    put (i+1, req : reqList)
+    return $ Queued (decode . (! i))
 
 -- |A 'Queued' value represents the result of a command inside a transaction. It
 --  is a proxy object for the /actual/ result, which will only be available
@@ -118,9 +127,10 @@ multiExec :: RedisTx (Queued a) -> Redis (TxResult a)
 multiExec rtx = do
     -- We don't need to catch exceptions and call DISCARD. The pool will close
     -- the connection anyway.
-    _        <- multi
-    Queued f <- runRedisTx rtx
-    r        <- exec
+    (Queued f, (_, reqList)) <- runRedisTx rtx
+    let finalReqList = ["MULTI"] : (reverse (["EXEC"] : reqList))
+    r <- sendRequestMulti finalReqList
+    -- TODO: add retry for exec abort
     case r of
         MultiBulk rs ->
             return $ maybe
@@ -129,8 +139,8 @@ multiExec rtx = do
                 rs
         _ -> error $ "hedis: EXEC returned " ++ show r
 
-multi :: Redis (Either Reply Status)
-multi = sendRequest ["MULTI"]
+-- multi :: Redis (Either Reply Status)
+-- multi = sendRequest ["MULTI"]
 
-exec :: Redis Reply
-exec = either id id <$> sendRequest ["EXEC"]
+-- exec :: Redis Reply
+-- exec = either id id <$> sendRequest ["EXEC"]
