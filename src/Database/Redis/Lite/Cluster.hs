@@ -16,6 +16,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as Char8
 import qualified Data.IntMap.Strict as IntMap
 import qualified Control.Concurrent.Chan.Unagi as Chan
+import qualified Data.Time as Time
 import Control.Monad (replicateM_, forever, void)
 import Control.Concurrent.Async (race)
 import Control.Concurrent (forkIO, threadDelay)
@@ -31,15 +32,20 @@ import qualified Database.Redis.ConnectionContext as CC
 import Database.Redis.Protocol (Reply(..), renderRequest, reply)
 import Database.Redis.Lite.Types
 
-initiateClusterWorkers :: NodeMapState -> (NodeMapState -> IO ()) -> IO ClusterChannel
-initiateClusterWorkers nodeMapState nodeMapRefresher = do
+initiateClusterWorkers :: NodeMapState -> (Maybe NodeID -> NodeMapState -> IO ()) -> Time.NominalDiffTime -> IO ClusterChannel
+initiateClusterWorkers nodeMapState nodeMapRefresher keepAlive = do
   (inChanReq, outChanReq) <- Chan.newChan
   (inChanRes, outChanRes) <- Chan.newChan
+  let keepAliveTime = round . (1000000 *) $ keepAlive 
   writerThread <- forkIO $ bufferWriter outChanReq nodeMapState nodeMapRefresher inChanRes
   readerThread <- forkIO $ bufferReader outChanRes
-  pure $ ClusterChannel inChanReq nodeMapState (ChanWorkers writerThread readerThread)
+  connRefresherThread <- forkIO $
+    forever $ do
+      threadDelay keepAliveTime
+      void $ try @SomeException $ nodeMapRefresher Nothing nodeMapState
+  pure $ ClusterChannel inChanReq (ChanWorkers writerThread readerThread connRefresherThread)
 
-bufferWriter :: Chan.OutChan ClusterChanRequest -> NodeMapState -> (NodeMapState -> IO ()) -> Chan.InChan (NodeConnection, Int, MVar (Either RedisException Reply)) -> IO ()
+bufferWriter :: Chan.OutChan ClusterChanRequest -> NodeMapState -> (Maybe NodeID -> NodeMapState -> IO ()) -> Chan.InChan (NodeConnection, Int, MVar (Either RedisException Reply)) -> IO ()
 bufferWriter outChanReq nodeMapState nodeMapRefresher inChanRes =
   forever $ do
     (ClusterChanRequest request nodeID reponseMVar) <- Chan.readChan outChanReq
@@ -53,7 +59,7 @@ bufferWriter outChanReq nodeMapState nodeMapRefresher inChanRes =
         case res of
           Left (err :: SomeException) -> do
             void $ try @SomeException $ CC.disconnect ctx
-            foreverRetry (nodeMapRefresher nodeMapState) "ConsumerWriter NodeMapRefreshErr"
+            foreverRetry (nodeMapRefresher (Just nodeID) nodeMapState) "ConsumerWriter NodeMapRefreshErr"
             putMVar reponseMVar (Left (ConnectionFailure err))
           Right _ ->
             Chan.writeChan inChanRes (nodeConn, length request, reponseMVar)
@@ -86,17 +92,17 @@ bufferReader outChan =
           return r
 
 foreverRetry :: IO a -> String -> IO a
-foreverRetry action errMsg = do
+foreverRetry action errLabel = do
   eRes <- try action
   case eRes of
     Left (err :: SomeException) -> do
-      putStrLn $ errMsg <> " - " <> (show err)
+      putStrLn $ errLabel <> " : " <> (show err)
       threadDelay 1000000
-      foreverRetry action errMsg
+      foreverRetry action errLabel
     Right res -> pure res
 
 clusterRequestHandler :: ClusterEnv -> [[B.ByteString]] -> Int -> IO Reply
-clusterRequestHandler env@(ClusterEnv (ClusterConnection (ClusterChannel inChan nodeMapState _) shardMapVar infoMap connectInfo) refreshShardMap refreshNodeMap) requests retryCount = do
+clusterRequestHandler env@(ClusterEnv (ClusterConnection (ClusterChannel inChan _) nodeMapState shardMapVar infoMap connectInfo) refreshShardMap refreshNodeMap) requests retryCount = do
   shardMap <- CL.hasLocked $ readMVar shardMapVar
   nodeId <- nodeIdForCommand infoMap shardMap requests
   mVar <- newEmptyMVar
@@ -133,7 +139,7 @@ clusterRequestHandler env@(ClusterEnv (ClusterConnection (ClusterChannel inChan 
           case err of
             MissingNode -> do
               shardMapNew <- CL.hasLocked $ readMVar shardMapVar
-              refreshNodeMap shardMapNew connectInfo nodeMapState
+              refreshNodeMap shardMapNew connectInfo (Just nodeId) nodeMapState
               clusterRequestHandler env requests (retryCount-1)
             _ ->
               clusterRequestHandler env requests (retryCount-1)
@@ -141,7 +147,7 @@ clusterRequestHandler env@(ClusterEnv (ClusterConnection (ClusterChannel inChan 
       if retryCount > 0
         then do
           shardMapNew <- CL.hasLocked $ readMVar shardMapVar
-          refreshNodeMap shardMapNew connectInfo nodeMapState
+          refreshNodeMap shardMapNew connectInfo (Just nodeId) nodeMapState
           clusterRequestHandler env requests (retryCount-1)
         else throwIO $ CL.TimeoutException "Reply MVar Wait Timeout"
 
@@ -187,11 +193,12 @@ disconnectMap (NodeMap nodeMap) = mapM_ (\(NodeConnection ctx _ _) -> CC.disconn
 
 getNodes :: ShardMap -> [Node]
 getNodes (ShardMap shardMap) =
-  IntMap.foldl (\acc (Shard (node@(Node nodeId _ _ _)) _) ->
-    case (L.find (\(Node nId _ _ _) -> nId == nodeId) acc) of
-      Just _ -> acc
-      Nothing -> node : acc
-    ) [] shardMap
+  let shards = IntMap.foldl (\acc shard@(Shard (Node nodeId _ _ _) _) ->
+        case (L.find (\(Shard (Node nId _ _ _) _) -> nId == nodeId) acc) of
+          Just _ -> acc
+          Nothing -> shard : acc
+        ) [] shardMap
+  in concat $ map (\(Shard master slaves) -> master : slaves) shards
 
 modifyMVarNoBlocking :: MVar a -> (a -> IO a) -> IO a
 modifyMVarNoBlocking mVar io = do

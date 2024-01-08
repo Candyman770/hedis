@@ -5,10 +5,11 @@ module Database.Redis.Lite.NonCluster where
 
 import qualified Data.ByteString as B
 import qualified Control.Concurrent.Chan.Unagi as Chan
+import qualified Data.Time as Time
 import Control.Concurrent.MVar (MVar, readMVar, putMVar, newEmptyMVar)
 import Control.Exception (SomeException, throwIO, try)
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Monad (replicateM, void)
+import Control.Monad (replicateM, void, forever)
 import Control.Concurrent.Async (race)
 import Data.Maybe (fromMaybe)
 
@@ -18,13 +19,18 @@ import qualified Database.Redis.Lite.Cluster as Cluster
 import qualified Database.Redis.Cluster as CL
 import qualified Database.Redis.ConnectionContext as CC
 
-initiateWorkers :: ConnectionState -> (ConnectionState -> IO ()) -> Int -> IO NonClusterChannel
-initiateWorkers connState connRefresher batchSize = do
+initiateWorkers :: ConnectionState -> (ConnectionState -> IO ()) -> Int -> Time.NominalDiffTime -> IO NonClusterChannel
+initiateWorkers connState connRefresher batchSize keepAlive = do
   (inChanReq, outChanReq) <- Chan.newChan
   (inChanRes, outChanRes) <- Chan.newChan
+  let keepAliveTime = round . (1000000 *) $ keepAlive 
   writerThread <- forkIO $ bufferWriter outChanReq [] connState connRefresher batchSize inChanRes
   readerThread <- forkIO $ Cluster.bufferReader outChanRes
-  pure $ NonClusterChannel inChanReq connState (ChanWorkers writerThread readerThread)
+  connRefresherThread <- forkIO $
+    forever $ do
+      threadDelay keepAliveTime
+      void $ try @SomeException $ connRefresher connState
+  pure $ NonClusterChannel inChanReq (ChanWorkers writerThread readerThread connRefresherThread)
 
 bufferWriter :: Chan.OutChan ChanRequest -> [(Chan.Element ChanRequest, IO ChanRequest)] -> ConnectionState -> (ConnectionState -> IO ()) -> Int -> Chan.InChan (NodeConnection, Int, MVar (Either RedisException Reply)) -> IO ()
 bufferWriter outChanReq currReqList connState connRefresher batchSize inChanRes = do
@@ -54,7 +60,7 @@ bufferWriter outChanReq currReqList connState connRefresher batchSize inChanRes 
         Just req -> spanM rest (req : xs)
 
 requestHandler :: NonClusterEnv -> [[B.ByteString]] -> Int -> IO Reply
-requestHandler env@(NonClusterEnv (NonClusterConnection (NonClusterChannel inChan connState _) connectInfo) refreshConn) requests retryCount = do
+requestHandler env@(NonClusterEnv (NonClusterConnection (NonClusterChannel inChan _) connState connectInfo) refreshConn) requests retryCount = do
   mVar <- newEmptyMVar
   Chan.writeChan inChan (ChanRequest (renderRequest <$> requests) mVar)
   let reqTimeout = fromMaybe 1000000 $ round . (1000000 *) <$> (requestTimeout connectInfo)

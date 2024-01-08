@@ -46,6 +46,9 @@ data ConnectInfo = ConnInfo
     -- ^ Optional TLS parameters. TLS will be enabled if this is provided.
     , requestTimeout        :: Maybe Time.NominalDiffTime
     , pipelineBatchSize     :: Maybe Int
+    -- max number of requests that can be pipelined. Used in non-cluster mode
+    , connectKeepAlive      :: Time.NominalDiffTime
+    -- Amount of time for which a connection is kept open.
     } deriving Show
 
 
@@ -76,9 +79,7 @@ data Node = Node NodeID NodeRole Host Port deriving (Show, Eq, Ord)
 type MasterNode = Node
 type SlaveNode = Node
 
--- A 'shard' is a master node and 0 or more slaves, (the 'master', 'slave'
--- terminology is unfortunate but I felt it better to follow the documentation
--- until it changes).
+-- A 'shard' is a master node and 0 or more slaves
 data Shard = Shard MasterNode [SlaveNode] deriving (Show, Eq, Ord)
 
 -- A map from hashslot to shards
@@ -87,9 +88,9 @@ newtype ShardMap = ShardMap (IntMap.IntMap Shard) deriving (Show)
 
 
 
-data ClusterConnection = ClusterConnection ClusterChannel (MVar ShardMap) CMD.InfoMap ConnectInfo
+data ClusterConnection = ClusterConnection ClusterChannel NodeMapState (MVar ShardMap) CMD.InfoMap ConnectInfo
 
-data NonClusterConnection = NonClusterConnection NonClusterChannel ConnectInfo
+data NonClusterConnection = NonClusterConnection NonClusterChannel ConnectionState ConnectInfo
 
 newtype NodeMap = NodeMap (HM.HashMap NodeID NodeConnection)
 
@@ -97,9 +98,9 @@ type NodeMapState = MVar NodeMap
 
 type ConnectionState = MVar NodeConnection
 
-data ClusterChannel = ClusterChannel (Chan.InChan ClusterChanRequest) NodeMapState ChanWorkers
+data ClusterChannel = ClusterChannel (Chan.InChan ClusterChanRequest) ChanWorkers
 
-data NonClusterChannel = NonClusterChannel (Chan.InChan ChanRequest) ConnectionState ChanWorkers
+data NonClusterChannel = NonClusterChannel (Chan.InChan ChanRequest) ChanWorkers
 
 data RedisException = MissingNode | ConnectionFailure SomeException deriving (Show, Typeable)
 instance Exception RedisException
@@ -108,6 +109,7 @@ data ChanWorkers =
   ChanWorkers
     { writer :: ThreadId
     , reader :: ThreadId
+    , connRefresher :: ThreadId
     }
 
 data ClusterChanRequest =
@@ -131,7 +133,7 @@ data ClusterEnv =
   ClusterEnv
     { connection :: ClusterConnection
     , refreshShardMap :: (ConnectInfo -> MVar (ShardMap) -> IO ShardMap)
-    , refreshNodeMap :: (ShardMap -> ConnectInfo -> NodeMapState -> IO ())
+    , refreshNodeMap :: (ShardMap -> ConnectInfo -> Maybe NodeID -> NodeMapState -> IO ())
     }
 
 data NonClusterEnv =

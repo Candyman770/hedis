@@ -3,7 +3,9 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
 
-module Database.Redis.Lite.Core where
+module Database.Redis.Lite.Core (
+  Redis, RedisCtx(..), sendRequestMulti
+) where
 
 import Data.ByteString (ByteString)
 import Control.Monad.Reader (ask, liftIO)

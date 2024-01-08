@@ -14,6 +14,7 @@ import Control.Monad.State.Strict
 import Control.DeepSeq
 import GHC.Generics
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as Char8
 import Data.Vector (Vector, fromList, (!))
 
 -- import Database.Redis.Core
@@ -82,7 +83,7 @@ data TxResult a
     = TxSuccess a
     -- ^ Transaction completed successfully. The wrapped value corresponds to
     --   the 'Queued' value returned from the 'multiExec' argument action.
-    | TxAborted
+    | TxAborted ByteString
     -- ^ Transaction aborted due to an earlier 'watch' command.
     | TxError String
     -- ^ At least one of the commands returned an 'Error' reply.
@@ -130,13 +131,15 @@ multiExec rtx = do
     (Queued f, (_, reqList)) <- runRedisTx rtx
     let finalReqList = ["MULTI"] : (reverse (["EXEC"] : reqList))
     r <- sendRequestMulti finalReqList
-    -- TODO: add retry for exec abort
     case r of
         MultiBulk rs ->
             return $ maybe
-                TxAborted
+                (TxAborted mempty)
                 (either (TxError . show) TxSuccess . f . fromList)
                 rs
+        Error errString -> case (Char8.words errString) of
+            ("EXECABORT" : rest) -> return $ TxAborted (Char8.unwords rest)
+            _ -> return $ TxError (show errString)
         _ -> error $ "hedis: EXEC returned " ++ show r
 
 -- multi :: Redis (Either Reply Status)
