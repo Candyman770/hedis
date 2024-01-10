@@ -17,13 +17,14 @@ import qualified Data.ByteString.Char8 as Char8
 import qualified Data.IntMap.Strict as IntMap
 import qualified Control.Concurrent.Chan.Unagi as Chan
 import qualified Data.Time as Time
-import Control.Monad (replicateM_, forever, void)
+import Control.Monad (replicateM_, replicateM, forever, void)
 import Control.Concurrent.Async (race)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (MVar, readMVar, newEmptyMVar, putMVar, tryTakeMVar)
 import Data.IORef (readIORef, writeIORef)
 import Control.Exception (SomeException, throwIO, try, mask, evaluate, onException)
 import Data.Maybe (fromMaybe)
+import Data.List.Extra (firstJust)
 import Scanner
 
 import qualified Database.Redis.Cluster as CL
@@ -45,7 +46,7 @@ initiateClusterWorkers nodeMapState nodeMapRefresher keepAlive = do
       void $ try @SomeException $ nodeMapRefresher Nothing nodeMapState
   pure $ ClusterChannel inChanReq (ChanWorkers writerThread readerThread connRefresherThread)
 
-bufferWriter :: Chan.OutChan ClusterChanRequest -> NodeMapState -> (Maybe NodeID -> NodeMapState -> IO ()) -> Chan.InChan (NodeConnection, Int, MVar (Either RedisException Reply)) -> IO ()
+bufferWriter :: Chan.OutChan ClusterChanRequest -> NodeMapState -> (Maybe NodeID -> NodeMapState -> IO ()) -> Chan.InChan (NodeConnection, Int, MVar (Either RedisException [Reply])) -> IO ()
 bufferWriter outChanReq nodeMapState nodeMapRefresher inChanRes =
   forever $ do
     (ClusterChanRequest request nodeID reponseMVar) <- Chan.readChan outChanReq
@@ -64,13 +65,12 @@ bufferWriter outChanReq nodeMapState nodeMapRefresher inChanRes =
           Right _ ->
             Chan.writeChan inChanRes (nodeConn, length request, reponseMVar)
 
-bufferReader :: Chan.OutChan (NodeConnection, Int, MVar (Either RedisException Reply)) -> IO ()
+bufferReader :: Chan.OutChan (NodeConnection, Int, MVar (Either RedisException [Reply])) -> IO ()
 bufferReader outChan =
   forever $ do
     (nodeConn@(NodeConnection ctx _ _), noOfResp, mVar) <- Chan.readChan outChan
-    eResp <- try $ do
-      replicateM_ (noOfResp - 1) (recvNode nodeConn)
-      recvNode nodeConn
+    eResp <- try $
+      replicateM noOfResp (recvNode nodeConn)
     case eResp of
       Left (err :: SomeException) -> do
         void $ try @SomeException $ CC.disconnect ctx
@@ -114,16 +114,16 @@ clusterRequestHandler env@(ClusterEnv (ClusterConnection (ClusterChannel inChan 
       case eReply of
         Right rply ->
           case rply of
-            (moveRedirection -> Just (slot, host, port)) ->
+            ((firstJust moveRedirection) -> Just (slot, host, port)) ->
               case retryCount of
-                0 -> pure rply
+                0 -> pure (L.last rply)
                 _ -> do
                   (ShardMap shardMapNew) <- CL.hasLocked $ readMVar shardMapVar
                   case (IntMap.lookup slot shardMapNew) of
                     Just (Shard (Node _ _ nHost nPort) _) | ((nHost == host) && (nPort == port)) -> pure ()
                     _ -> void $ refreshShardMap connectInfo shardMapVar
                   clusterRequestHandler env requests (retryCount-1)  
-            (askingRedirection -> Just (host, port)) -> do
+            ((firstJust askingRedirection) -> Just (host, port)) -> do
               shardMapNew <- CL.hasLocked $ readMVar shardMapVar
               let maybeAskNode = nodeWithHostAndPort shardMapNew host port
               case maybeAskNode of
@@ -133,7 +133,7 @@ clusterRequestHandler env@(ClusterEnv (ClusterConnection (ClusterChannel inChan 
                   _ -> do
                     void $ refreshShardMap connectInfo shardMapVar
                     clusterRequestHandler env requests (retryCount-1)
-            _ -> pure rply
+            _ -> pure (L.last rply)
         Left err | (retryCount <= 0) -> throwIO err
         Left err ->
           case err of

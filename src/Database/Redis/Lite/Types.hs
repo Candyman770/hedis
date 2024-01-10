@@ -116,13 +116,13 @@ data ClusterChanRequest =
   ClusterChanRequest
   { request :: [B.ByteString]
   , nodeID :: B.ByteString
-  , responseMVar :: MVar (Either RedisException Reply)
+  , responseMVar :: MVar (Either RedisException [Reply])
   }
 
 data ChanRequest =
   ChanRequest
   { request :: [B.ByteString]
-  , reponseMVar :: MVar (Either RedisException Reply)
+  , reponseMVar :: MVar (Either RedisException [Reply])
   }
 
 data RedisEnv

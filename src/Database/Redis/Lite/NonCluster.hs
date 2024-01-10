@@ -6,6 +6,7 @@ module Database.Redis.Lite.NonCluster where
 import qualified Data.ByteString as B
 import qualified Control.Concurrent.Chan.Unagi as Chan
 import qualified Data.Time as Time
+import qualified Data.List as L
 import Control.Concurrent.MVar (MVar, readMVar, putMVar, newEmptyMVar)
 import Control.Exception (SomeException, throwIO, try)
 import Control.Concurrent (forkIO, threadDelay)
@@ -32,7 +33,7 @@ initiateWorkers connState connRefresher batchSize keepAlive = do
       void $ try @SomeException $ connRefresher connState
   pure $ NonClusterChannel inChanReq (ChanWorkers writerThread readerThread connRefresherThread)
 
-bufferWriter :: Chan.OutChan ChanRequest -> [(Chan.Element ChanRequest, IO ChanRequest)] -> ConnectionState -> (ConnectionState -> IO ()) -> Int -> Chan.InChan (NodeConnection, Int, MVar (Either RedisException Reply)) -> IO ()
+bufferWriter :: Chan.OutChan ChanRequest -> [(Chan.Element ChanRequest, IO ChanRequest)] -> ConnectionState -> (ConnectionState -> IO ()) -> Int -> Chan.InChan (NodeConnection, Int, MVar (Either RedisException [Reply])) -> IO ()
 bufferWriter outChanReq currReqList connState connRefresher batchSize inChanRes = do
   ((_, blockingRead) : newReqList) <- (currReqList ++) <$> replicateM (batchSize - (length currReqList)) (Chan.tryReadChan outChanReq)
   fstElement <- blockingRead
@@ -68,7 +69,7 @@ requestHandler env@(NonClusterEnv (NonClusterConnection (NonClusterChannel inCha
   case resp of
     Right eReply ->
       case eReply of
-        Right reply -> pure reply
+        Right reply -> pure (L.last reply)
         Left err | (retryCount <= 0) -> throwIO err
         Left _ -> do
           refreshConn connectInfo connState
