@@ -95,6 +95,7 @@ defaultConnectInfo = ConnInfo
     , connectTLSParams      = Nothing
     , requestTimeout        = Nothing
     , pipelineBatchSize     = Nothing
+    , connectKeepAlive      = 60
     }
 
 auth
@@ -250,7 +251,7 @@ connectCluster bootstrapConnInfo = do
       clusterConnect :: Bool -> IO Cluster.Connection -> IO Cluster.Connection
       clusterConnect readOnlyConnection connection = do
           clusterConn@(Cluster.Connection nodeMap _ _ _ _) <- connection
-          nodesConns <-  sequence $ ( PP.fromCtx . (\(Cluster.NodeConnection ctx _ _) -> ctx ) . snd) <$> (HM.toList nodeMap)
+          nodesConns <-  sequence $ ( PP.fromCtx . (\(Cluster.NodeConnection ctx _ _ _) -> ctx ) . snd) <$> (HM.toList nodeMap)
           when readOnlyConnection $
                   mapM_ (\conn -> do
                           PP.beginReceiving conn
@@ -283,7 +284,7 @@ refreshShardMapWithNodeConn :: [Cluster.NodeConnection] -> IO ShardMap
 refreshShardMapWithNodeConn [] = throwIO $ ClusterConnectError (Error "Couldn't refresh shardMap due to connection error")
 refreshShardMapWithNodeConn nodeConnsList = do
     selectedIdx <- randomRIO (0, (length nodeConnsList) - 1)
-    let (Cluster.NodeConnection ctx _ _) = nodeConnsList !! selectedIdx
+    let (Cluster.NodeConnection ctx _ _ _) = nodeConnsList !! selectedIdx
     pipelineConn <- PP.fromCtx ctx
     envTimeout <- fromMaybe (10 ^ (3 :: Int)) . (>>= readMaybe) <$> lookupEnv "REDIS_CLUSTER_SLOTS_TIMEOUT"
     raceResult <- race (threadDelay envTimeout) (try $ refreshShardMapWithConn pipelineConn True) -- racing with delay of default 1 ms 

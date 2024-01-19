@@ -15,6 +15,7 @@ import Control.Concurrent.MVar (MVar)
 import Control.Monad.Reader (ReaderT)
 import Control.Exception (SomeException, Exception)
 import Data.Typeable (Typeable)
+import System.Clock (TimeSpec)
 
 import qualified Database.Redis.ConnectionContext as CC
 import qualified Database.Redis.Cluster.Command as CMD
@@ -46,25 +47,28 @@ data ConnectInfo = ConnInfo
     -- ^ Optional TLS parameters. TLS will be enabled if this is provided.
     , requestTimeout        :: Maybe Time.NominalDiffTime
     , pipelineBatchSize     :: Maybe Int
-    -- max number of requests that can be pipelined. Used in non-cluster mode
+    -- ^ max number of requests that can be pipelined. Used in non-cluster mode
     , connectKeepAlive      :: Time.NominalDiffTime
-    -- Amount of time for which a connection is kept open.
+    -- ^ Max amount of time for which a connection is kept open.
     } deriving Show
 
 
 
 
 -- | A connection to a single node in the cluster, similar to 'ProtocolPipelining.Connection'
-data NodeConnection = NodeConnection CC.ConnectionContext (IORef (Maybe B.ByteString)) NodeID
+data NodeConnection = NodeConnection CC.ConnectionContext (IORef (Maybe B.ByteString)) TimeSpec NodeID
 
 instance Show NodeConnection where
-    show (NodeConnection _ _ id1) = "nodeId: " <> show id1
+    show (NodeConnection _ _ t1 id1) = "NodeConnection " <> show id1 <> " " <> show t1
 
 instance Eq NodeConnection where
-    (NodeConnection _ _ id1) == (NodeConnection _ _ id2) = id1 == id2
+    (NodeConnection _ _ t1 id1) == (NodeConnection _ _ t2 id2) = (id1 == id2) && (t1 == t2)
 
 instance Ord NodeConnection where
-    compare (NodeConnection _ _ id1) (NodeConnection _ _ id2) = compare id1 id2
+    compare (NodeConnection _ _ t1 id1) (NodeConnection _ _ t2 id2) =
+      case compare id1 id2 of
+        EQ -> compare t1 t2
+        vl -> vl
 
 data NodeRole = Master | Slave deriving (Show, Eq, Ord)
 
@@ -88,9 +92,9 @@ newtype ShardMap = ShardMap (IntMap.IntMap Shard) deriving (Show)
 
 
 
-data ClusterConnection = ClusterConnection ClusterChannel NodeMapState (MVar ShardMap) CMD.InfoMap ConnectInfo
+data ClusterConnection = ClusterConnection RedisLiteChannel NodeMapState (MVar ShardMap) CMD.InfoMap ConnectInfo
 
-data NonClusterConnection = NonClusterConnection NonClusterChannel ConnectionState ConnectInfo
+data NonClusterConnection = NonClusterConnection RedisLiteChannel ConnectionState ConnectInfo
 
 newtype NodeMap = NodeMap (HM.HashMap NodeID NodeConnection)
 
@@ -98,11 +102,9 @@ type NodeMapState = MVar NodeMap
 
 type ConnectionState = MVar NodeConnection
 
-data ClusterChannel = ClusterChannel (Chan.InChan ClusterChanRequest) ChanWorkers
+data RedisLiteChannel = RedisLiteChannel (Chan.InChan ChanRequest) (MVar ChanWorkers)
 
-data NonClusterChannel = NonClusterChannel (Chan.InChan ChanRequest) ChanWorkers
-
-data RedisException = MissingNode | ConnectionFailure SomeException deriving (Show, Typeable)
+data RedisException = MissingNode | Timeout String | ConnectionFailure SomeException deriving (Show, Typeable)
 instance Exception RedisException
 
 data ChanWorkers =
@@ -110,19 +112,14 @@ data ChanWorkers =
     { writer :: ThreadId
     , reader :: ThreadId
     , connRefresher :: ThreadId
+    , timeoutHandler :: ThreadId
     }
-
-data ClusterChanRequest =
-  ClusterChanRequest
-  { request :: [B.ByteString]
-  , nodeID :: B.ByteString
-  , responseMVar :: MVar (Either RedisException [Reply])
-  }
 
 data ChanRequest =
   ChanRequest
   { request :: [B.ByteString]
-  , reponseMVar :: MVar (Either RedisException [Reply])
+  , nodeID :: B.ByteString
+  , responseMVar :: MVar (Either RedisException [Reply])
   }
 
 data RedisEnv
@@ -139,7 +136,7 @@ data ClusterEnv =
 data NonClusterEnv =
   NonClusterEnv
     { connection :: NonClusterConnection
-    , refreshConnection :: (ConnectInfo -> ConnectionState -> IO ())
+    , refreshConnection :: (ConnectInfo -> Bool -> ConnectionState -> IO ())
     }
 
 data Connection

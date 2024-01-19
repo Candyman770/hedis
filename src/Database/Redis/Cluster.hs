@@ -49,8 +49,9 @@ import qualified Scanner
 import System.Environment (lookupEnv)
 import System.IO.Unsafe(unsafeInterleaveIO)
 import Text.Read (readMaybe)
+import System.Clock (Clock(..), getTime)
 
-import Database.Redis.Lite.Types hiding (Connection, ChanRequest(..), ClusterChanRequest(..), ClusterEnv(..))
+import Database.Redis.Lite.Types hiding (Connection, ChanRequest(..), ClusterEnv(..))
 import Database.Redis.Protocol(Reply(Error), renderRequest, reply)
 import qualified Database.Redis.Cluster.Command as CMD
 
@@ -138,13 +139,14 @@ connect withAuth commandInfos shardMapVar timeoutOpt isReadOnly refreshShardMap 
     connectNode (Node n _ host port) = do
         ctx <- withAuth host (CC.PortNumber $ toEnum port) timeoutOpt
         ref <- IOR.newIORef Nothing
-        return (n, NodeConnection ctx ref n)
+        timeSpec <- getTime Monotonic
+        return (n, NodeConnection ctx ref timeSpec n)
     refreshShardMapVar :: ShardMap -> IO ()
     refreshShardMapVar shardMap = hasLocked $ modifyMVar_ shardMapVar (const (pure shardMap))
 
 disconnect :: Connection -> IO ()
 disconnect (Connection nodeConnMap _ _ _ _ ) = mapM_ disconnectNode (HM.elems nodeConnMap) where
-    disconnectNode (NodeConnection nodeCtx _ _) = CC.disconnect nodeCtx
+    disconnectNode (NodeConnection nodeCtx _ _ _) = CC.disconnect nodeCtx
 
 -- Add a request to the current pipeline for this connection. The pipeline will
 -- be executed implicitly as soon as any result returned from this function is
@@ -428,7 +430,7 @@ allMasterNodes (Connection nodeConns _ _ _ _) (ShardMap shardMap) =
     onlyMasterNodes = (\(Shard master _) -> master) <$> nub (IntMap.elems shardMap)
 
 requestNode :: NodeConnection -> [[B.ByteString]] -> IO [Reply]
-requestNode (NodeConnection ctx lastRecvRef _) requests = do
+requestNode (NodeConnection ctx lastRecvRef _ _) requests = do
     envTimeout <- round . (\x -> (x :: Time.NominalDiffTime) * 1000000) . realToFrac . fromMaybe (0.5 :: Double) . (>>= readMaybe) <$> lookupEnv "REDIS_REQUEST_NODE_TIMEOUT"
     eresp <- race requestNodeImpl (threadDelay envTimeout)
     case eresp of
