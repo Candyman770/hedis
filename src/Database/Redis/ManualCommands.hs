@@ -1181,6 +1181,23 @@ xpendingDetail stream group startId endId count consumer = sendRequest $
     ["XPENDING", stream, group, startId, endId, encode count] ++ consumerArg
     where consumerArg = maybe [] (\c -> [c]) consumer
 
+xpendingWithMinIdleTime
+  :: (RedisCtx m f)
+  => ByteString          -- ^ stream key
+  -> ByteString          -- ^ group name
+  -> Integer       -- ^ minIdleTime (in milliseconds).
+  -> Integer             -- ^ count (max number of entries to return)
+  -> Maybe ByteString    -- ^ optional consumer name
+  -> m (f [XPendingDetailRecord])
+xpendingWithMinIdleTime stream group minIdleTime count consumerM = sendRequest $
+    ["XPENDING", stream, group]
+    ++ idleArg
+    ++ ["-", "+", encode count] -- Hardcoding "-" and "+" for start and end IDs
+    ++ consumerArg
+  where
+    idleArg = ["IDLE", encode minIdleTime]
+    consumerArg = maybe [] (\c -> [c]) consumerM
+
 data XClaimOpts = XClaimOpts
     { xclaimIdle :: Maybe Integer
     , xclaimTime :: Maybe Integer

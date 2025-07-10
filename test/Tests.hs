@@ -714,6 +714,49 @@ testXpending = testCase "xpending" $ do
             messageId HUnit.@=? "121-0"
         Right bad -> HUnit.assertFailure $ "Unexpectedly got " ++ show bad
 
+testXPendingWithIdle :: Test
+testXPendingWithIdle = testCase "xpendingWithMinIdleTime" $ do
+    let stream = "somestream"
+        group = "somegroup"
+        consumer = "consumer1"
+
+    -- 1. Add messages to the stream
+    xadd stream "121" [("key1", "value1")] >>=? "121-0"
+    xadd stream "122" [("key2", "value2")] >>=? "122-0"
+
+    -- 2. Create a consumer group
+    xgroupCreate stream group "0" >>=? Ok
+
+    -- 3. Read messages to make them pending
+    xreadGroupOpts group consumer [(stream, ">")] (defaultXreadOpts { recordCount = Just 2 }) >>=? Just
+        [ XReadResponse
+            { stream = stream
+            , records =
+                [ StreamsRecord {recordId = "121-0", keyValues = [("key1", "value1")]}
+                , StreamsRecord {recordId = "122-0", keyValues = [("key2", "value2")]}
+                ]
+            }
+        ]
+
+    -- 4. Wait for a bit
+    liftIO $ threadDelay 100000 -- 100ms
+
+    -- 5. Check pending messages with idle time
+    pending <- xpendingWithMinIdleTime stream group 50 10 (Just consumer)
+    liftIO $ case pending of
+        Left reply -> HUnit.assertFailure $ "Redis error: " ++ show reply
+        Right records -> do
+            HUnit.assertEqual "Should have 2 pending messages" 2 (length records)
+            let ids = L.sort $ map messageId records
+            HUnit.assertEqual "Message IDs should match" ["121-0", "122-0"] ids
+
+    -- 6. Check with a larger idle time
+    pending2 <- xpendingWithMinIdleTime stream group 2000 10 (Just consumer)
+    liftIO $ case pending2 of
+        Left reply -> HUnit.assertFailure $ "Redis error: " ++ show reply
+        Right records ->
+            HUnit.assertEqual "Should have 0 pending messages with large idle time" 0 (length records)
+
 testXClaim ::Test
 testXClaim =
   testCase "xclaim" $ do
