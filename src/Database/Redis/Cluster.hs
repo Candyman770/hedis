@@ -36,8 +36,9 @@ import Data.Map(fromListWith, assocs)
 import Data.Function(on)
 import Control.Exception(Exception, SomeException, throwIO, BlockedIndefinitelyOnMVar(..), catches, Handler(..), try, fromException)
 import Data.Pool(Pool, createPool, withResource, destroyAllResources)
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar(MVar, newMVar, readMVar, modifyMVar)
-import Control.Monad(zipWithM, replicateM)
+import Control.Monad(zipWithM, replicateM, unless)
 import Database.Redis.Cluster.HashSlot(HashSlot, keyToSlot)
 import qualified Database.Redis.ConnectionContext as CC
 import qualified Data.HashMap.Strict as HM
@@ -124,8 +125,8 @@ type NodeConnectionMap = HM.HashMap NodeID NodeConnection
 
 -- Object for storing connection Info which will be used when cluster is refreshed
 data ClusterConfig = ClusterConfig
-    { 
-        requestTimeout  :: Int -- in microseconds
+    { requestTimeout :: Int -- in microseconds
+    , tryAgainDelay  :: Int -- in microseconds
     } deriving Show
 
 newtype MissingNodeException = MissingNodeException [B.ByteString] deriving (Show, Typeable)
@@ -143,13 +144,15 @@ instance Exception NoNodeException
 data TimeoutException = TimeoutException String deriving (Show, Typeable)
 instance Exception TimeoutException
 
-createClusterConnectionPools :: (Host -> CC.PortID -> IO CC.ConnectionContext) -> Int -> Time.NominalDiffTime -> [CMD.CommandInfo] -> ShardMap -> Maybe Double -> IO Connection
-createClusterConnectionPools withAuth maxResources idleTime commandInfos shardMap requestTimeoutSeconds = do
+createClusterConnectionPools :: (Host -> CC.PortID -> IO CC.ConnectionContext) -> Int -> Time.NominalDiffTime -> [CMD.CommandInfo] -> ShardMap -> Maybe Double -> Maybe Double -> IO Connection
+createClusterConnectionPools withAuth maxResources idleTime commandInfos shardMap requestTimeoutSeconds tryAgainDelaySeconds = do
         nodeConns <- nodeConnections
         shardNodeVar <- newMVar (shardMap, nodeConns)
         nodeRequestTimeout <- round . (\x -> (x :: Time.NominalDiffTime) * 1000000) . realToFrac . fromMaybe (5 :: Double) . (requestTimeoutSeconds <|> ). (>>= readMaybe) <$> lookupEnv "REDIS_REQUEST_NODE_TIMEOUT"
+        tryAgainDelayTime <- round . (\x -> (x :: Time.NominalDiffTime) * 1000000) . realToFrac . fromMaybe (0.1 :: Double) . (tryAgainDelaySeconds <|> ). (>>= readMaybe) <$> lookupEnv "REDIS_TRYAGAIN_ERROR_DELAY"
         let clusterConfig = ClusterConfig {
                     requestTimeout = nodeRequestTimeout
+                ,   tryAgainDelay = tryAgainDelayTime
                 }
         return $ Connection shardNodeVar (CMD.newInfoMap commandInfos) clusterConfig where
     nodeConnections :: IO (HM.HashMap NodeID NodeConnection)
@@ -245,7 +248,7 @@ rawResponse (CompletedRequest _ _ r) = r
 -- acceptable in most cases as these errors should only occur in the case of
 -- cluster reconfiguration events, which should be rare.
 evaluatePipeline :: (Maybe NodeConnection -> IO (ShardMap, NodeConnectionMap)) -> Connection -> [[B.ByteString]] -> IO [Reply]
-evaluatePipeline refreshShardmapAction conn@(Connection shardNodeVar infoMap (ClusterConfig reqTimeout)) requests = do
+evaluatePipeline refreshShardmapAction conn@(Connection shardNodeVar infoMap (ClusterConfig reqTimeout tryAgainDelayTime)) requests = do
         (shardMap, nodesConn) <- hasLocked $ readMVar shardNodeVar
         erequestsByNode <- try $ getRequestsByNode shardMap nodesConn
         requestsByNode <- case erequestsByNode of
@@ -273,18 +276,8 @@ evaluatePipeline refreshShardmapAction conn@(Connection shardNodeVar infoMap (Cl
                                         Just (er :: TimeoutException) -> hasLocked $ refreshShardmapAction Nothing >> throwIO er
                                         _ -> getRandomConnection nc conn >>= (`executeRequests` r)
                 refreshedShardMapAndNodeConnsIORef <- IOR.newIORef Nothing
-                mapM (\completedRequest@(CompletedRequest index request response) -> 
-                    case response of
-                        (Error errString) | (B.isPrefixOf "MOVED" errString || B.isPrefixOf "TRYAGAIN" errString) -> CompletedRequest index request <$> refreshShardMapAndRetryRequest refreshedShardMapAndNodeConnsIORef (hasLocked $ refreshShardmapAction (Just nc)) request
-                        (askingRedirection -> Just (host, port)) -> do 
-                                refreshedShardMapAndNodeConns <- fromMaybeM (hasLocked $ refreshShardmapAction (Just nc)) $ IOR.readIORef refreshedShardMapAndNodeConnsIORef
-                                maybeAskNode <- nodeConnWithHostAndPort refreshedShardMapAndNodeConns host port
-                                case maybeAskNode of
-                                    Just askNode -> CompletedRequest index request <$> (head <$> tail <$> requestNode reqTimeout askNode (["ASKING"] : [request]))
-                                    Nothing -> do
-                                        CompletedRequest index request <$> refreshShardMapAndRetryRequest refreshedShardMapAndNodeConnsIORef (hasLocked $ refreshShardmapAction (Just nc)) request
-                        _ -> return completedRequest
-                    ) responses
+                tryAgainDelayIORef <- IOR.newIORef False
+                mapM (responseHandler refreshedShardMapAndNodeConnsIORef tryAgainDelayIORef nc 1) responses
             ) (zip eresps requestsByNode)
         return $ map rawResponse $ sortBy (on compare responseIndex) resps
   where
@@ -300,12 +293,37 @@ evaluatePipeline refreshShardmapAction conn@(Connection shardNodeVar infoMap (Cl
     executeRequests nodeConn nodeRequests = do
         replies <- requestNode reqTimeout nodeConn $ map rawRequest nodeRequests
         return $ zipWith (curry (\(PendingRequest i r, rep) -> CompletedRequest i r rep)) nodeRequests replies
-    refreshShardMapAndRetryRequest :: IOR.IORef (Maybe (ShardMap, NodeConnectionMap)) -> IO (ShardMap, NodeConnectionMap) -> [B.ByteString] -> IO Reply
-    refreshShardMapAndRetryRequest refreshedShardMapAndNodeConnsIORef refreshShardmap request =  do 
-        (newShardMap, newNodeConn) <- fromMaybeM (hasLocked refreshShardmap >>= (\new -> IOR.writeIORef refreshedShardMapAndNodeConnsIORef (Just new) >> return new )) $ 
-                                        IOR.readIORef refreshedShardMapAndNodeConnsIORef
+    refreshShardMapIORef :: IOR.IORef (Maybe (ShardMap, NodeConnectionMap)) -> NodeConnection -> IO (ShardMap, NodeConnectionMap)
+    refreshShardMapIORef refreshedShardMapAndNodeConnsIORef nodeConnection =
+        fromMaybeM
+            (hasLocked (refreshShardmapAction (Just nodeConnection)) >>= (\new -> IOR.writeIORef refreshedShardMapAndNodeConnsIORef (Just new) >> return new))
+            (IOR.readIORef refreshedShardMapAndNodeConnsIORef)
+    refreshShardMapAndRetryRequest :: IOR.IORef (Maybe (ShardMap, NodeConnectionMap)) -> NodeConnection -> [B.ByteString] -> IO Reply
+    refreshShardMapAndRetryRequest refreshedShardMapAndNodeConnsIORef nodeConnection request =  do 
+        (newShardMap, newNodeConn) <- refreshShardMapIORef refreshedShardMapAndNodeConnsIORef nodeConnection
         nodeConns <- nodeConnectionForCommand newShardMap newNodeConn infoMap request
         head <$> requestNode reqTimeout (head nodeConns) [request]
+    responseHandler :: IOR.IORef (Maybe (ShardMap, NodeConnectionMap)) -> IOR.IORef Bool -> NodeConnection -> Int -> CompletedRequest -> IO CompletedRequest
+    responseHandler refreshedShardMapAndNodeConnsIORef tryAgainDelayIORef nc retryCount completedRequest@(CompletedRequest index request response) =
+        case response of
+            (Error errString) | (B.isPrefixOf "MOVED" errString) -> CompletedRequest index request <$> refreshShardMapAndRetryRequest refreshedShardMapAndNodeConnsIORef nc request
+            (Error errString) | (B.isPrefixOf "TRYAGAIN" errString) -> 
+                if retryCount > 0
+                    then do
+                        tryAgainDelayed <- IOR.readIORef tryAgainDelayIORef
+                        unless tryAgainDelayed $ do
+                            threadDelay tryAgainDelayTime
+                            IOR.writeIORef tryAgainDelayIORef True
+                        newReply <- head <$> requestNode reqTimeout nc [request]
+                        responseHandler refreshedShardMapAndNodeConnsIORef tryAgainDelayIORef nc (retryCount - 1) (CompletedRequest index request newReply)
+                    else return completedRequest
+            (askingRedirection -> Just (host, port)) -> do
+                refreshedShardMapAndNodeConns <- refreshShardMapIORef refreshedShardMapAndNodeConnsIORef nc
+                maybeAskNode <- nodeConnWithHostAndPort refreshedShardMapAndNodeConns host port
+                case maybeAskNode of
+                    Just askNode -> CompletedRequest index request <$> (head <$> tail <$> requestNode reqTimeout askNode (["ASKING"] : [request]))
+                    Nothing -> CompletedRequest index request <$> refreshShardMapAndRetryRequest refreshedShardMapAndNodeConnsIORef nc request
+            _ -> return completedRequest
 
 --fix multi exec
 -- Like `evaluateOnPipeline`, except we expect to be able to run all commands
@@ -313,7 +331,7 @@ evaluatePipeline refreshShardmapAction conn@(Connection shardNodeVar infoMap (Cl
 evaluateTransactionPipeline :: (Maybe NodeConnection -> IO (ShardMap, NodeConnectionMap)) -> Connection -> [[B.ByteString]] -> IO [Reply]
 evaluateTransactionPipeline refreshShardmapAction conn requests' = do
     let requests = reverse requests'
-    let (Connection shardNodeVar infoMap (ClusterConfig reqTimeout)) = conn
+    let (Connection shardNodeVar infoMap (ClusterConfig reqTimeout _)) = conn
     keys <- mconcat <$> mapM (requestKeys infoMap) requests
     -- In cluster mode Redis expects commands in transactions to all work on the
     -- same hashslot. We find that hashslot here.
@@ -508,7 +526,7 @@ hasLocked action =
 
 
 requestMasterNodes :: Connection -> [B.ByteString] -> IO [Reply]
-requestMasterNodes conn@(Connection _ _ (ClusterConfig reqTimeout)) req = do
+requestMasterNodes conn@(Connection _ _ (ClusterConfig reqTimeout _)) req = do
     masterNodeConns <- masterNodes conn
     concat <$> mapM (flip (requestNode reqTimeout) [req]) masterNodeConns
 

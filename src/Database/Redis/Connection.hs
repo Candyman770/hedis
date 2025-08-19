@@ -96,6 +96,10 @@ data ConnectInfo = ConnInfo
     -- ^ timeout for a redis command request in seconds example: 0.5 seconds (500 milliseconds)
     -- post requestTimeout, TimeoutException will be thrown. This is now only applicable to cluster redis.
     -- TODO add for non cluster redis also
+    , tryAgainDelay         :: Maybe Double
+    -- ^ retry delay for a redis command request when TRYAGAIN error is received during cluster slot migration
+    -- default value is 100 ms
+    -- 
     } deriving Show
 
 data ConnectAuth = Static B.ByteString | Dynamic ShowableIORefByteString
@@ -137,6 +141,7 @@ defaultConnectInfo = ConnInfo
     , connectTimeout        = Nothing
     , connectTLSParams      = Nothing
     , requestTimeout        = Nothing
+    , tryAgainDelay         = Nothing
     }
 
 defaultClusterConnectInfo :: ConnectInfo
@@ -151,6 +156,7 @@ defaultClusterConnectInfo = ConnInfo
     , connectTimeout        = Nothing
     , connectTLSParams      = Nothing
     , requestTimeout        = Nothing
+    , tryAgainDelay         = Nothing
     }
 
 createConnection :: ConnectInfo -> IO PP.Connection
@@ -236,7 +242,7 @@ instance Exception ClusterConnectError
 -- - MOVE, SELECT
 -- - PUBLISH, SUBSCRIBE, PSUBSCRIBE, UNSUBSCRIBE, PUNSUBSCRIBE, RESET
 connectCluster :: ConnectInfo -> IO Connection
-connectCluster bootstrapConnInfo@ConnInfo{connectMaxConnections,connectMaxIdleTime,requestTimeout} = do
+connectCluster bootstrapConnInfo@ConnInfo{connectMaxConnections,connectMaxIdleTime,requestTimeout,tryAgainDelay} = do
     conn <- createConnection bootstrapConnInfo
     slotsResponse <- runRedisInternal conn clusterSlots
     shardMap <- case slotsResponse of
@@ -247,7 +253,7 @@ connectCluster bootstrapConnInfo@ConnInfo{connectMaxConnections,connectMaxIdleTi
         Left e -> throwIO $ ClusterConnectError e
         Right infos -> do
             let withAuth = connectWithAuth bootstrapConnInfo
-            clusterConnection <- Cluster.createClusterConnectionPools withAuth connectMaxConnections connectMaxIdleTime infos shardMap requestTimeout
+            clusterConnection <- Cluster.createClusterConnectionPools withAuth connectMaxConnections connectMaxIdleTime infos shardMap requestTimeout tryAgainDelay
             return $ ClusteredConnection bootstrapConnInfo clusterConnection
 
 connectWithAuth :: ConnectInfo -> Cluster.Host -> CC.PortID -> IO CC.ConnectionContext
