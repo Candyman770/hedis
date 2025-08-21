@@ -49,7 +49,7 @@ import qualified Scanner
 import System.Environment (lookupEnv)
 import System.IO.Unsafe(unsafeInterleaveIO)
 import Text.Read (readMaybe)
-import Control.Monad.Extra (loopM, fromMaybeM)
+import Control.Monad.Extra (loopM, fromMaybeM, whenJust)
 import Database.Redis.Protocol(Reply(Error), renderRequest, reply)
 import qualified Database.Redis.Cluster.Command as CMD
 import System.Timeout (timeout)
@@ -126,7 +126,7 @@ type NodeConnectionMap = HM.HashMap NodeID NodeConnection
 -- Object for storing connection Info which will be used when cluster is refreshed
 data ClusterConfig = ClusterConfig
     { requestTimeout :: Int -- in microseconds
-    , tryAgainDelay  :: Int -- in microseconds
+    , tryAgainDelay  :: Maybe Int -- in microseconds
     } deriving Show
 
 newtype MissingNodeException = MissingNodeException [B.ByteString] deriving (Show, Typeable)
@@ -149,7 +149,7 @@ createClusterConnectionPools withAuth maxResources idleTime commandInfos shardMa
         nodeConns <- nodeConnections
         shardNodeVar <- newMVar (shardMap, nodeConns)
         nodeRequestTimeout <- round . (\x -> (x :: Time.NominalDiffTime) * 1000000) . realToFrac . fromMaybe (5 :: Double) . (requestTimeoutSeconds <|> ). (>>= readMaybe) <$> lookupEnv "REDIS_REQUEST_NODE_TIMEOUT"
-        tryAgainDelayTime <- round . (\x -> (x :: Time.NominalDiffTime) * 1000000) . realToFrac . fromMaybe (0.1 :: Double) . (tryAgainDelaySeconds <|> ). (>>= readMaybe) <$> lookupEnv "REDIS_TRYAGAIN_ERROR_DELAY"
+        let tryAgainDelayTime = round . (\x -> (x :: Time.NominalDiffTime) * 1000000) . realToFrac <$> tryAgainDelaySeconds
         let clusterConfig = ClusterConfig {
                     requestTimeout = nodeRequestTimeout
                 ,   tryAgainDelay = tryAgainDelayTime
@@ -310,10 +310,11 @@ evaluatePipeline refreshShardmapAction conn@(Connection shardNodeVar infoMap (Cl
             (Error errString) | (B.isPrefixOf "TRYAGAIN" errString) -> 
                 if retryCount > 0
                     then do
-                        tryAgainDelayed <- IOR.readIORef tryAgainDelayIORef
-                        unless tryAgainDelayed $ do
-                            threadDelay tryAgainDelayTime
-                            IOR.writeIORef tryAgainDelayIORef True
+                        whenJust tryAgainDelayTime $ \_tryAgainDelay -> do
+                            tryAgainDelayed <- IOR.readIORef tryAgainDelayIORef
+                            unless tryAgainDelayed $ do
+                                threadDelay _tryAgainDelay
+                                IOR.writeIORef tryAgainDelayIORef True
                         newReply <- head <$> requestNode reqTimeout nc [request]
                         responseHandler refreshedShardMapAndNodeConnsIORef tryAgainDelayIORef nc (retryCount - 1) (CompletedRequest index request newReply)
                     else return completedRequest
