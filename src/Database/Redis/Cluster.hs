@@ -38,7 +38,7 @@ import Control.Exception(Exception, SomeException, throwIO, BlockedIndefinitelyO
 import Data.Pool(Pool, createPool, withResource, destroyAllResources)
 import Control.Concurrent.MVar(MVar, newMVar, readMVar, modifyMVar)
 import Control.Monad(zipWithM, replicateM)
-import Database.Redis.Cluster.HashSlot(HashSlot, keyToSlot)
+import Database.Redis.Cluster.HashSlot(HashSlot(..), keyToSlot, numHashSlots)
 import qualified Database.Redis.ConnectionContext as CC
 import qualified Data.HashMap.Strict as HM
 import qualified Data.IntMap.Strict as IntMap
@@ -52,6 +52,7 @@ import Control.Monad.Extra (loopM, fromMaybeM)
 import Database.Redis.Protocol(Reply(Error), renderRequest, reply)
 import qualified Database.Redis.Cluster.Command as CMD
 import System.Timeout (timeout)
+import System.Random (randomRIO)
 import Control.Applicative((<|>))
 
 -- This module implements a clustered connection whilst maintaining
@@ -400,7 +401,7 @@ hashSlotForKeys exception keys =
     case nubOrd (keyToSlot <$> keys) of
         -- If none of the commands contain a key we can send them to any
         -- node. Let's pick the first one.
-        [] -> return 0
+        [] -> HashSlot <$> randomRIO (0, numHashSlots - 1)
         [hashSlot] -> return hashSlot
         _ -> throwIO $ exception
 
