@@ -1,5 +1,8 @@
 # Changelog for Hedis
 
+## 0.15.6
+* PR#63. Randomized node selection in cluster mode for commands with "step" field description as 0
+
 ## 0.15.5
 * PR#49. Changed connectAuth type to sum type to support dynamic auths
 * PR#49. Added requestTimeout in connectInfo for timeout of redis command

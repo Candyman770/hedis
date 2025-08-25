@@ -400,7 +400,7 @@ hashSlotForKeys :: Exception e => e -> [B.ByteString] -> IO HashSlot
 hashSlotForKeys exception keys =
     case nubOrd (keyToSlot <$> keys) of
         -- If none of the commands contain a key we can send them to any
-        -- node. Let's pick the first one.
+        -- node. Let's pick a random one.
         [] -> HashSlot <$> randomRIO (0, numHashSlots - 1)
         [hashSlot] -> return hashSlot
         _ -> throwIO $ exception
