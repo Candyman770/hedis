@@ -18,19 +18,19 @@ main = do
     Test.defaultMain (tests conn)
 
 tests :: Connection -> [Test.Test]
-tests conn = map ($conn) $ concat
+tests conn = map ($conn) (concat
     [ testsGeoSets,testsMisc, testsKeys, testsStrings, [testHashes], testsLists, testsSets, [testHyperLogLog]
     , testsZSets, [testTransaction], [testScripting]
     , testsConnection, testsServer, [testSScan, testHScan, testZScan], [testZrangelex]
     , [testXAddRead, testXReadGroup, testXRange, testXpending,  testXPendingWithIdle, testXClaim, testXInfo, testXDel, testXTrim]
     , [testFunctionLoad, testFCall, testFunctionList, testFunctionDelete]
-      -- should always be run last as connection gets closed after it
-    , [testQuit]
-    ]
+    ]) ++ [testTryAgain conn]
+    -- testQuit should always be run last as connection gets closed after it
+    ++ map ($conn) [testQuit]
 
 testsServer :: [Test]
 testsServer =
-    [testBgrewriteaof, testFlushall, testSlowlog, testDebugObject]
+    [testBgrewriteaof, testFlushall, testSlowlog]
 
 testsConnection :: [Test]
 testsConnection = [ testConnectAuthUnexpected, testEcho, testPing

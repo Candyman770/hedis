@@ -152,7 +152,8 @@ test-suite hedis-test
         test-framework,
         test-framework-hunit,
         time,
-        file-embed
+        file-embed,
+        process
     -- We use -O0 here, since GHC takes *very* long to compile so many constants
     ghc-options: -O0 -Wall -rtsopts -fno-warn-unused-do-bind
     if flag(dev)
@@ -179,7 +180,8 @@ test-suite hedis-test-cluster
         test-framework,
         test-framework-hunit,
         time,
-        file-embed
+        file-embed,
+        process
     -- We use -O0 here, since GHC takes *very* long to compile so many constants
     ghc-options: -O0 -Wall -rtsopts -fno-warn-unused-do-bind
     if flag(dev)
