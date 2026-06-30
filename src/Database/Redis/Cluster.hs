@@ -306,15 +306,7 @@ evaluatePipeline refreshShardmapAction conn@(Connection shardNodeVar infoMap (Cl
     responseHandler :: IOR.IORef (Maybe (ShardMap, NodeConnectionMap)) -> IOR.IORef Bool -> NodeConnection -> Int -> CompletedRequest -> IO CompletedRequest
     responseHandler refreshedShardMapAndNodeConnsIORef tryAgainDelayIORef nc retryCount completedRequest@(CompletedRequest index request response) =
         case response of
-            (Error errString) | (B.isPrefixOf "MOVED" errString) -> do
-                refreshedShardMapAndNodeConns <- refreshShardMapIORef refreshedShardMapAndNodeConnsIORef nc
-                case movedRedirection (Error errString) of
-                    Just (host, port) -> do
-                        maybeTargetNode <- nodeConnWithHostAndPort refreshedShardMapAndNodeConns host port
-                        case maybeTargetNode of
-                            Just targetNode -> CompletedRequest index request <$> (head <$> requestNode reqTimeout targetNode [request])
-                            Nothing -> CompletedRequest index request <$> refreshShardMapAndRetryRequest refreshedShardMapAndNodeConnsIORef nc request
-                    Nothing -> CompletedRequest index request <$> refreshShardMapAndRetryRequest refreshedShardMapAndNodeConnsIORef nc request
+            (Error errString) | (B.isPrefixOf "MOVED" errString) -> CompletedRequest index request <$> refreshShardMapAndRetryRequest refreshedShardMapAndNodeConnsIORef nc request
             (Error errString) | (B.isPrefixOf "TRYAGAIN" errString) -> 
                 if retryCount > 0
                     then do
@@ -436,16 +428,6 @@ requestKeys infoMap request =
     case CMD.keysForRequest infoMap request of
         Nothing -> throwIO $ UnsupportedClusterCommandException request
         Just k -> return k
-
-movedRedirection :: Reply -> Maybe (Host, Port)
-movedRedirection (Error errString) = case Char8.words errString of
-    ["MOVED", _, hostport] -> case Char8.split ':' hostport of
-       [host, portString] -> case Char8.readInt portString of
-         Just (port,"") -> Just (Char8.unpack host, port)
-         _ -> Nothing
-       _ -> Nothing
-    _ -> Nothing
-movedRedirection _ = Nothing
 
 askingRedirection :: Reply -> Maybe (Host, Port)
 askingRedirection (Error errString) = case Char8.words errString of
