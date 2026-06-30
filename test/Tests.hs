@@ -10,6 +10,7 @@ import Control.Exception (try,SomeException)
 import Control.Concurrent
 import Control.Monad
 import Control.Monad.Trans
+import System.Process (readProcess)
 import qualified Data.List as L
 import Data.Time
 import Data.Time.Clock.POSIX
@@ -863,6 +864,121 @@ testFunctionDelete :: Test
 testFunctionDelete = testCase "functionDelete" $ do
     res <- functionDelete "hedis_test"
     (pure res) >>=?! replicate (length res) Ok
+
+------------------------------------------------------------------------------
+-- TRYAGAIN retry test
+--
+-- TRYAGAIN is returned by Redis for multi-key commands (MGET, DEL, etc.) when
+-- the keys' slot is mid-migration AND the keys are physically split across
+-- the source and target nodes (Scenario 3):
+--
+--   key1 → already migrated to target node
+--   key2 → still on source node
+--   MGET {tryagain}k1 {tryagain}k2 → TRYAGAIN (cannot fulfill atomically)
+--
+-- For the retry to succeed, the migration must complete between the first
+-- attempt and the retry. We achieve this by:
+--   1. Creating a connection with tryAgainDelay = 300ms
+--   2. Starting a background thread that completes the migration after 100ms
+--   3. The retry fires at 300ms — migration is done → MOVED → redirect → success
+--
+-- Flow:
+--   MGET → source → TRYAGAIN
+--   responseHandler: sleep 300ms (tryAgainDelay)
+--   [background: at 100ms, key2 migrated + slot finalised on target]
+--   responseHandler: retry → source → MOVED (all keys now on target)
+--   responseHandler: MOVED → redirect to target → Right [Just "val1", Just "val2"]
+--
+testTryAgain :: Test
+testTryAgain _conn = Test.testCase "TRYAGAIN retry during slot migration" $ do
+    -- Create a dedicated connection with tryAgainDelay so retry fires after
+    -- the background migration thread has had time to complete the move.
+    conn <- connectCluster defaultConnectInfo
+                { connectPort = PortNumber 30001
+                , tryAgainDelay = Just 0.3  -- 300ms delay before retry
+                }
+
+    let key1 = "{tryagain}k1"
+        key2 = "{tryagain}k2"
+
+    -- Write both keys (same slot via hash tag)
+    runRedis conn $ do
+        set key1 "val1" >>=? Ok
+        set key2 "val2" >>=? Ok
+
+    -- Discover slot and cluster topology
+    slotStr   <- readProcess "redis-cli" ["-p", "30001", "cluster", "keyslot", "{tryagain}k1"] ""
+    nodesInfo <- readProcess "redis-cli" ["-p", "30001", "cluster", "nodes"] ""
+    let slot      = filter (/= '\n') slotStr
+        nodeLines = lines nodesInfo
+
+        parseNode l = case words l of
+            (nid:addrBus:_) -> let addr = takeWhile (/= '@') addrBus
+                                   port = drop 1 $ dropWhile (/= ':') addr
+                               in Just (nid, port)
+            _               -> Nothing
+        nodes = [ (nid, port) | Just (nid, port) <- map parseNode nodeLines
+                               , not (null port) ]
+
+        splitOn _ [] = [[]]
+        splitOn d (c:cs)
+            | c == d    = [] : splitOn d cs
+            | otherwise = let (h:t) = splitOn d cs in (c:h):t
+
+        ownsSlot l = any (\w -> ('-' `elem` w && inRange slot w) || w == slot)
+                         (drop 8 (words l))
+          where inRange s range = case splitOn '-' range of
+                  [lo, hi] -> (read s :: Int) >= read lo && (read s :: Int) <= read hi
+                  _        -> False
+
+        srcLine = filter ownsSlot nodeLines
+        srcNode = case srcLine of
+                    (l:_) -> case words l of { (nid:_) -> nid; _ -> "" }
+                    _     -> ""
+        srcPort = case [ p | (nid, p) <- nodes, nid == srcNode ] of
+                    (p:_) -> p
+                    _     -> "30001"
+
+        isMaster l = "master" `elem` words l
+        otherMasters = filter (\l -> isMaster l && head (words l) /= srcNode) nodeLines
+        (tgtNode, tgtPort) = case otherMasters of
+            (l:_) -> case words l of
+                       (nid:addrBus:_) ->
+                           let p = drop 1 $ dropWhile (/= ':') $ takeWhile (/= '@') addrBus
+                           in (nid, p)
+                       _ -> ("", "30002")
+            _ -> ("", "30002")
+
+    -- Flag slot as mid-migration on both nodes
+    _ <- readProcess "redis-cli" ["-p", srcPort, "cluster", "setslot", slot, "migrating", tgtNode] ""
+    _ <- readProcess "redis-cli" ["-p", tgtPort, "cluster", "setslot", slot, "importing", srcNode] ""
+
+    -- Migrate key1 to target → keys are now split → MGET will return TRYAGAIN
+    _ <- readProcess "redis-cli" ["-p", srcPort, "migrate", "127.0.0.1", tgtPort, "{tryagain}k1", "0", "5000"] ""
+
+    -- Background thread: after 100ms, complete the migration so the retry succeeds.
+    -- By the time responseHandler retries (after tryAgainDelay = 300ms), all keys
+    -- will be on the target node and the slot will be finalised.
+    _ <- forkIO $ do
+        threadDelay 100000  -- 100ms
+        _ <- readProcess "redis-cli" ["-p", srcPort, "migrate", "127.0.0.1", tgtPort, "{tryagain}k2", "0", "5000"] ""
+        _ <- readProcess "redis-cli" ["-p", tgtPort, "cluster", "setslot", slot, "node", tgtNode] ""
+        _ <- readProcess "redis-cli" ["-p", srcPort, "cluster", "setslot", slot, "node", tgtNode] ""
+        return ()
+
+    -- Issue MGET:
+    --   attempt 1 → source → TRYAGAIN (keys split)
+    --   responseHandler sleeps 300ms (background thread completes migration at 100ms)
+    --   attempt 2 → source → MOVED (all keys now on target)
+    --   responseHandler follows MOVED → target → Right [Just "val1", Just "val2"]
+    result <- runRedis conn $ mget [key1, key2]
+
+    case result of
+        Right vals ->
+            HUnit.assertEqual "expected both values after TRYAGAIN retry"
+                [Just "val1", Just "val2"] vals
+        Left err ->
+            HUnit.assertFailure $ "Got Redis error — TRYAGAIN not retried: " ++ show err
 
 testsGeoSet :: Test
 testsGeoSet = testCase "geoadd and geosearch operations" $ do
