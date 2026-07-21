@@ -120,7 +120,6 @@ configResetstat, -- |Reset the stats returned by INFO (<http://redis.io/commands
 configRewrite, -- |Rewrite the configuration file with the in memory configuration (<http://redis.io/commands/config-rewrite>). Since Redis 2.8.0
 configSet, -- |Set a configuration parameter to the given value (<http://redis.io/commands/config-set>). Since Redis 2.0.0
 dbsize, -- |Return the number of keys in the selected database (<http://redis.io/commands/dbsize>). Since Redis 1.0.0
-debugObject, -- |Get debugging information about a key (<http://redis.io/commands/debug-object>). Since Redis 1.0.0
 flushall, -- |Remove all keys from all databases (<http://redis.io/commands/flushall>). Since Redis 1.0.0
 flushdb, -- |Remove all keys from the current database (<http://redis.io/commands/flushdb>). Since Redis 1.0.0
 info, -- |Get information and statistics about the server (<http://redis.io/commands/info>). The Redis command @INFO@ is split up into 'info', 'infoSection'. Since Redis 1.0.0
@@ -128,10 +127,11 @@ infoSection, -- |Get information and statistics about the server (<http://redis.
 lastsave, -- |Get the UNIX time stamp of the last successful save to disk (<http://redis.io/commands/lastsave>). Since Redis 1.0.0
 save, -- |Synchronously save the dataset to disk (<http://redis.io/commands/save>). Since Redis 1.0.0
 slaveof, -- |Make the server a slave of another instance, or promote it as master (<http://redis.io/commands/slaveof>). Since Redis 1.0.0
-Slowlog(..),
-slowlogGet, -- |Manages the Redis slow queries log (<http://redis.io/commands/slowlog>). The Redis command @SLOWLOG@ is split up into 'slowlogGet', 'slowlogLen', 'slowlogReset'. Since Redis 2.2.12
-slowlogLen, -- |Manages the Redis slow queries log (<http://redis.io/commands/slowlog>). The Redis command @SLOWLOG@ is split up into 'slowlogGet', 'slowlogLen', 'slowlogReset'. Since Redis 2.2.12
-slowlogReset, -- |Manages the Redis slow queries log (<http://redis.io/commands/slowlog>). The Redis command @SLOWLOG@ is split up into 'slowlogGet', 'slowlogLen', 'slowlogReset'. Since Redis 2.2.12
+-- TODO: Need to Fix for the commands which are cluster implementation independent
+-- Slowlog(..),
+-- slowlogGet, -- |Manages the Redis slow queries log (<http://redis.io/commands/slowlog>). The Redis command @SLOWLOG@ is split up into 'slowlogGet', 'slowlogLen', 'slowlogReset'. Since Redis 2.2.12
+-- slowlogLen, -- |Manages the Redis slow queries log (<http://redis.io/commands/slowlog>). The Redis command @SLOWLOG@ is split up into 'slowlogGet', 'slowlogLen', 'slowlogReset'. Since Redis 2.2.12
+-- slowlogReset, -- |Manages the Redis slow queries log (<http://redis.io/commands/slowlog>). The Redis command @SLOWLOG@ is split up into 'slowlogGet', 'slowlogLen', 'slowlogReset'. Since Redis 2.2.12
 time, -- |Return the current server time (<http://redis.io/commands/time>). Since Redis 2.6.0
 
 -- ** Sets
@@ -413,12 +413,6 @@ rpushx
     -> ByteString -- ^ value
     -> m (f Integer)
 rpushx key value = sendRequest (["RPUSHX"] ++ [encode key] ++ [encode value] )
-
-debugObject
-    :: (RedisCtx m f)
-    => ByteString -- ^ key
-    -> m (f ByteString)
-debugObject key = sendRequest (["DEBUG","OBJECT"] ++ [encode key] )
 
 bgsave
     :: (RedisCtx m f)

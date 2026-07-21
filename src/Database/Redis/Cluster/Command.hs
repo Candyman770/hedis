@@ -7,6 +7,7 @@ import qualified Data.ByteString.Char8 as Char8
 import qualified Data.HashMap.Strict as HM
 import Database.Redis.Types(RedisResult(decode))
 import Database.Redis.Protocol(Reply(..))
+import Control.Applicative ((<|>))
 
 data Flag
     = Write
@@ -30,7 +31,7 @@ data AritySpec = Required Integer | MinimumRequired Integer deriving (Show)
 
 data LastKeyPositionSpec = LastKeyPosition Integer | UnlimitedKeys Integer deriving (Show)
 
-newtype InfoMap = InfoMap (HM.HashMap String CommandInfo)
+newtype InfoMap = InfoMap (HM.HashMap String CommandInfo) deriving (Show)
 
 -- Represents the result of the COMMAND command, which returns information
 -- about the position of keys in a request
@@ -41,6 +42,7 @@ data CommandInfo = CommandInfo
     , firstKeyPosition :: Integer
     , lastKeyPosition :: LastKeyPositionSpec
     , stepCount :: Integer
+    , subcommandsInfo :: Maybe InfoMap
     } deriving (Show)
 
 instance RedisResult CommandInfo where
@@ -50,17 +52,64 @@ instance RedisResult CommandInfo where
         , MultiBulk (Just replyFlags)
         , Integer firstKeyPos
         , Integer lastKeyPos
-        , Integer replyStepCount])) = do
-            parsedFlags <- mapM parseFlag replyFlags
-            lastKey <- parseLastKeyPos
-            return $ CommandInfo
-                { name = commandName
-                , arity = parseArity aritySpec
-                , flags = parsedFlags
-                , firstKeyPosition = firstKeyPos
-                , lastKeyPosition = lastKey
-                , stepCount = replyStepCount
-                } where
+        , Integer replyStepCount])) = decodeCommandInfo (MultiBulk (Just
+                                        [ Bulk (Just commandName)
+                                        , Integer aritySpec
+                                        , MultiBulk (Just replyFlags)
+                                        , Integer firstKeyPos
+                                        , Integer lastKeyPos
+                                        , Integer replyStepCount
+                                        , MultiBulk Nothing])) -- added empty subcommand info for backward compatibility
+    -- since redis 6.0
+    decode (MultiBulk (Just
+        [ name@(Bulk (Just _))
+        , arity@(Integer _)
+        , flags@(MultiBulk (Just _))
+        , firstPos@(Integer _)
+        , lastPos@(Integer _)
+        , step@(Integer _)
+        , MultiBulk _  -- ACL categories
+        ])) =
+        decodeCommandInfo (MultiBulk (Just [name, arity, flags, firstPos, lastPos, step, MultiBulk Nothing]))
+    -- since redis 7.0
+    decode (MultiBulk (Just
+        [ name@(Bulk (Just _))
+        , arity@(Integer _)
+        , flags@(MultiBulk (Just _))
+        , firstPos@(Integer _)
+        , lastPos@(Integer _)
+        , step@(Integer _)
+        , MultiBulk _  -- ACL categories
+        , MultiBulk _  -- Tips
+        , MultiBulk _  -- Key specifications
+        , MultiBulk subCommandInfo  -- Sub commands
+        ])) =
+        decodeCommandInfo (MultiBulk (Just [name, arity, flags, firstPos, lastPos, step, MultiBulk subCommandInfo]))
+
+    decode e = Left e
+
+decodeCommandInfo :: Reply -> Either Reply CommandInfo
+decodeCommandInfo (MultiBulk (Just
+        [ Bulk (Just commandName)
+        , Integer aritySpec
+        , MultiBulk (Just replyFlags)
+        , Integer firstKeyPos
+        , Integer lastKeyPos
+        , Integer replyStepCount
+        , MultiBulk subcommands
+        ])) = do
+        parsedFlags <- mapM parseFlag replyFlags
+        lastKey <- parseLastKeyPos
+        subcommandsInfoMap <- parseSubcommandsInfo
+        return $ CommandInfo
+            { name = commandName
+            , arity = parseArity aritySpec
+            , flags = parsedFlags
+            , firstKeyPosition = firstKeyPos
+            , lastKeyPosition = lastKey
+            , stepCount = replyStepCount
+            , subcommandsInfo = subcommandsInfoMap
+            } where
         parseArity int = case int of
             i | i >= 0 -> Required i
             i -> MinimumRequired $ abs i
@@ -86,33 +135,14 @@ instance RedisResult CommandInfo where
         parseLastKeyPos = return $ case lastKeyPos of
             i | i < 0 -> UnlimitedKeys (-i - 1)
             i -> LastKeyPosition i
-    -- since redis 6.0
-    decode (MultiBulk (Just
-        [ name@(Bulk (Just _))
-        , arity@(Integer _)
-        , flags@(MultiBulk (Just _))
-        , firstPos@(Integer _)
-        , lastPos@(Integer _)
-        , step@(Integer _)
-        , MultiBulk _  -- ACL categories
-        ])) =
-        decode (MultiBulk (Just [name, arity, flags, firstPos, lastPos, step]))
-    -- since redis 7.0
-    decode (MultiBulk (Just
-        [ name@(Bulk (Just _))
-        , arity@(Integer _)
-        , flags@(MultiBulk (Just _))
-        , firstPos@(Integer _)
-        , lastPos@(Integer _)
-        , step@(Integer _)
-        , MultiBulk _  -- ACL categories
-        , MultiBulk _  -- Tips
-        , MultiBulk _  -- Key specifications
-        , MultiBulk _  -- Sub commands
-        ])) =
-        decode (MultiBulk (Just [name, arity, flags, firstPos, lastPos, step]))
-
-    decode e = Left e
+        parseSubcommandsInfo :: Either Reply (Maybe InfoMap)
+        parseSubcommandsInfo = do
+            subCommandInfo <- decode (MultiBulk subcommands)
+            case subCommandInfo of
+                Nothing     -> return Nothing
+                Just []     -> return Nothing
+                Just cmds   -> return $ Just $ newInfoMap cmds
+decodeCommandInfo reply = Left reply -- unknown and unexpected 
 
 newInfoMap :: [CommandInfo] -> InfoMap
 newInfoMap = InfoMap . HM.fromList . map (\c -> (Char8.unpack $ name c, c))
@@ -125,9 +155,16 @@ keysForRequest _ ["DEBUG", "OBJECT", key] =
 keysForRequest _ ["QUIT"] =
     -- The `QUIT` command is not listed in the `COMMAND` output.
     Just []
-keysForRequest (InfoMap infoMap) request@(command:_) = do
+keysForRequest (InfoMap infoMap) request@(command:remainingArgs) = do
     info <- HM.lookup (map toLower $ Char8.unpack command) infoMap
-    keysForRequest' info request
+    finalCommandInfo <- case subcommandsInfo info of
+                            Nothing                             -> Just info
+                            Just (InfoMap subcommandsInfoMap)   -> 
+                                    case remainingArgs of
+                                        (subcommand:_) -> HM.lookup (map toLower (Char8.unpack command ++ "|" ++ Char8.unpack subcommand)) subcommandsInfoMap 
+                                                                <|> Just info -- as a fallback
+                                        _ -> Just info
+    keysForRequest' finalCommandInfo request
 keysForRequest _ [] = Nothing
 
 keysForRequest' :: CommandInfo -> [BS.ByteString] -> Maybe [BS.ByteString]

@@ -15,7 +15,7 @@ tests conn = map ($conn) $ concat
     [ testsGeoSets,testsMisc, testsKeys, testsStrings, [testHashes], testsLists, testsSets, [testHyperLogLog]
     , testsZSets, [testPubSub], [testTransaction], [testScripting]
     , testsConnection, testsServer, [testScans, testSScan, testHScan, testZScan], [testZrangelex]
-    , [testXAddRead, testXReadGroup, testXRange, testXpending, testXPendingWithIdle, testXClaim, testXInfo, testXDel, testXTrim]
+    , [testXAddRead, testXReadGroup, testXRange, testXpending, testXPendingWithIdle, testXClaim, testXInfo, testXDel, testXTrim, testXTrimMinid, testXAddMinid, testXTrimWithLimit, testXAddWithLimit]
     , testPubSubThreaded
     , [testFunctionLoad, testFCall, testFunctionList, testFunctionDelete]
       -- should always be run last as connection gets closed after it
@@ -25,7 +25,7 @@ tests conn = map ($conn) $ concat
 testsServer :: [Test]
 testsServer =
     [testServer, testBgrewriteaof, testFlushall, testInfo, testConfig
-    ,testSlowlog, testDebugObject]
+    ]
 
 testsConnection :: [Test]
 testsConnection = [ testConnectAuth, testConnectAuthUnexpected, testConnectDb

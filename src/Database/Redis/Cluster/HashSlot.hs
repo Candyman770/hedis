@@ -1,6 +1,6 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Database.Redis.Cluster.HashSlot(HashSlot, keyToSlot) where
+module Database.Redis.Cluster.HashSlot(HashSlot(..), keyToSlot, numHashSlots) where
 
 import Data.Bits((.&.), xor, shiftL)
 import qualified Data.ByteString.Char8 as Char8

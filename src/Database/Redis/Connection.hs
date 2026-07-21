@@ -10,7 +10,7 @@ import qualified Control.Monad.Catch as Catch
 import Control.Monad.IO.Class(liftIO, MonadIO)
 import Control.Monad(when,foldM)
 
-import Control.Concurrent.MVar(modifyMVar)
+import Control.Concurrent.MVar(modifyMVar, readMVar)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as Char8
 import Data.Functor(void)
@@ -24,11 +24,11 @@ import qualified Network.Socket as NS
 import qualified Data.HashMap.Strict as HM
 import System.Random (randomRIO)
 import System.Environment (lookupEnv)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Text.Read (readMaybe)
 
 import qualified Database.Redis.ProtocolPipelining as PP
-import Database.Redis.Core(Redis, runRedisInternal, runRedisClusteredInternal)
+import Database.Redis.Core(Redis, runRedisInternal, runRedisClusteredInternal, sendRequest)
 import Database.Redis.Protocol(Reply(..))
 import Database.Redis.Cluster(ShardMap(..), Node(..), Shard(..), NodeConnectionMap)
 import qualified Database.Redis.Cluster as Cluster
@@ -244,10 +244,12 @@ instance Exception ClusterConnectError
 connectCluster :: ConnectInfo -> IO Connection
 connectCluster bootstrapConnInfo@ConnInfo{connectMaxConnections,connectMaxIdleTime,requestTimeout,tryAgainDelay} = do
     conn <- createConnection bootstrapConnInfo
+    epochReply <- runRedisInternal conn (sendRequest ["CLUSTER", "INFO"])
+    let epoch = either (const 0) parseClusterEpoch epochReply
     slotsResponse <- runRedisInternal conn clusterSlots
     shardMap <- case slotsResponse of
         Left e -> throwIO $ ClusterConnectError e
-        Right slots -> shardMapFromClusterSlotsResponse slots
+        Right slots -> shardMapFromClusterSlotsResponse epoch slots
     commandInfos <- runRedisInternal conn command
     case commandInfos of
         Left e -> throwIO $ ClusterConnectError e
@@ -280,8 +282,11 @@ connectWithAuth ConnInfo{connectTLSParams,connectAuth,connectReadOnly,connectTim
 clusterConnectTimeoutinUs :: Time.NominalDiffTime -> Int
 clusterConnectTimeoutinUs = round . (1000000 *) 
 
-shardMapFromClusterSlotsResponse :: ClusterSlotsResponse -> IO ShardMap
-shardMapFromClusterSlotsResponse ClusterSlotsResponse{..} = ShardMap <$> foldr mkShardMap (pure IntMap.empty)  clusterSlotsResponseEntries where
+shardMapFromClusterSlotsResponse :: Int -> ClusterSlotsResponse -> IO ShardMap
+shardMapFromClusterSlotsResponse epoch ClusterSlotsResponse{..} = do
+    slots <- foldr mkShardMap (pure IntMap.empty) clusterSlotsResponseEntries
+    return ShardMap { shardMapSlots = slots, shardMapEpoch = epoch }
+  where
     mkShardMap :: ClusterSlotsResponseEntry -> IO (IntMap.IntMap Shard) -> IO (IntMap.IntMap Shard)
     mkShardMap ClusterSlotsResponseEntry{..} accumulator = do
         accumulated <- accumulator
@@ -297,12 +302,45 @@ shardMapFromClusterSlotsResponse ClusterSlotsResponse{..} = ShardMap <$> foldr m
         in
             Cluster.Node clusterSlotsNodeID role hostname (toEnum clusterSlotsNodePort)
 
+-- Parse cluster_current_epoch from the CLUSTER INFO bulk-string response.
+-- CLUSTER INFO returns lines like "cluster_current_epoch:6\r\n".
+parseClusterEpoch :: Reply -> Int
+parseClusterEpoch (Bulk (Just bs)) =
+    let ls = Char8.lines bs
+        prefix = "cluster_current_epoch:"
+        found = listToMaybe $ mapMaybe (fmap Char8.unpack . Char8.stripPrefix prefix) ls
+    in case found >>= readMaybe of
+        Just n  -> n
+        Nothing -> 0
+parseClusterEpoch _ = 0
+
 refreshShardMap :: ConnectInfo -> Cluster.Connection -> Maybe Cluster.NodeConnection -> IO (ShardMap, NodeConnectionMap)
 refreshShardMap connectInfo@ConnInfo{connectMaxConnections,connectMaxIdleTime} (Cluster.Connection shardNodeVar _ _) nodeConn = do
-    modifyMVar shardNodeVar $ \(_, oldNodeConnMap) -> do
-        newShardMap <- refreshShardMapWithNodeConn nodeConn (HM.elems oldNodeConnMap)
-        newNodeConnMap <- updateNodeConnections newShardMap oldNodeConnMap        
-        return ((newShardMap, newNodeConnMap), (newShardMap, newNodeConnMap))
+    -- Do the blocking CLUSTER INFO + CLUSTER SLOTS round-trips OUTSIDE the MVar.
+    -- We only take a snapshot of the existing node connections (readMVar does not
+    -- hold the lock) to reach a node, so routing threads that merely readMVar the
+    -- shardNodeVar are not blocked for the duration of the network fetch.
+    (_, nodeConnSnapshot) <- readMVar shardNodeVar
+    newShardMap <- refreshShardMapWithNodeConn nodeConn (HM.elems nodeConnSnapshot)
+    -- The critical section below is now non-blocking: compare epochs against the
+    -- freshest current ShardMap and swap. updateNodeConnections only allocates
+    -- resource-pool structures (createPool opens sockets lazily, on demand), so it
+    -- holds the lock for negligible time.
+    modifyMVar shardNodeVar $ \(currentShardMap, oldNodeConnMap) -> do
+        -- Epoch guard: Redis cluster gossip is eventually consistent.
+        -- A CLUSTER SLOTS response from a gossip-lagged node carries a lower
+        -- cluster_current_epoch. Writing it back would overwrite a correct
+        -- post-failover ShardMap with a stale one.
+        -- We skip the guard when either epoch is 0 (parse failed / old node)
+        -- so that a missing CLUSTER INFO never permanently blocks refreshes.
+        let isStale = shardMapEpoch currentShardMap > 0
+                   && shardMapEpoch newShardMap    > 0
+                   && shardMapEpoch newShardMap    < shardMapEpoch currentShardMap
+        if isStale
+            then return ((currentShardMap, oldNodeConnMap), (currentShardMap, oldNodeConnMap))
+            else do
+                newNodeConnMap <- updateNodeConnections newShardMap oldNodeConnMap
+                return ((newShardMap, newNodeConnMap), (newShardMap, newNodeConnMap))
     where
         withAuth :: Cluster.Host -> CC.PortID -> IO CC.ConnectionContext
         withAuth = connectWithAuth connectInfo
@@ -351,12 +389,17 @@ refreshShardMapWithNodeConn maybeNodeConn nodeConnsList = do
 refreshShardMapWithConn :: PP.Connection -> Bool -> IO ShardMap
 refreshShardMapWithConn pipelineConn _ = do
     _ <- PP.beginReceiving pipelineConn
+    -- Fetch cluster_current_epoch from CLUSTER INFO so we can guard against
+    -- stale overwrites: a ShardMap fetched from a gossip-lagged node will have
+    -- a lower epoch and will never be allowed to overwrite a newer one.
+    epochReply  <- runRedisInternal pipelineConn (sendRequest ["CLUSTER", "INFO"])
+    let epoch = either (const 0) parseClusterEpoch epochReply
     slotsResponse <- runRedisInternal pipelineConn clusterSlots
     case slotsResponse of
         Left e -> throwIO $ ClusterConnectError e
-        Right slots -> case clusterSlotsResponseEntries slots of 
+        Right slots -> case clusterSlotsResponseEntries slots of
             [] -> throwIO $ ClusterConnectError $ SingleLine "empty slotsResponse"
-            _ -> shardMapFromClusterSlotsResponse slots
+            _ -> shardMapFromClusterSlotsResponse epoch slots
 
 -- This function gets the byteString from the connectAuth
 getConnectionAuthByteString :: Maybe ConnectAuth -> IO (Maybe B.ByteString)

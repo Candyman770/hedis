@@ -30,7 +30,7 @@ tests conn = map ($conn) $ concat
 
 testsServer :: [Test]
 testsServer =
-    [testBgrewriteaof, testFlushall, testSlowlog, testDebugObject]
+    [testBgrewriteaof, testFlushall]
 
 testsConnection :: [Test]
 testsConnection = [ testConnectAuthUnexpected, testEcho, testPing
