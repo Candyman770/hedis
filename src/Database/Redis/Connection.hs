@@ -98,8 +98,6 @@ data ConnectInfo = ConnInfo
     -- TODO add for non cluster redis also
     , tryAgainDelay         :: Maybe Double
     -- ^ retry delay for a redis command request when TRYAGAIN error is received during cluster slot migration
-    -- default value is 100 ms
-    -- 
     } deriving Show
 
 data ConnectAuth = Static B.ByteString | Dynamic ShowableIORefByteString
